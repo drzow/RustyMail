@@ -9,9 +9,11 @@
 //! transport, command/response loop, and converts wire types to rustymail
 //! domain types. MCP tool surface lives in `crate::mcp::adapters::sieve`.
 
+pub mod client;
 pub mod error;
 pub mod parser;
 pub mod types;
 
+pub use client::SieveClient;
 pub use error::Error;
 pub use types::{Capabilities, SieveScript};

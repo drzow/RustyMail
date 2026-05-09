@@ -68,6 +68,7 @@ pub enum Command {
     PutScript(String, String),
     ListScripts,
     SetActive(String),
+    GetScript(String),
     DeleteScript(String),
     RenameScript(String),
     CheckScript(String),
@@ -106,6 +107,10 @@ impl Command {
 
     pub fn set_active(name: &str) -> Result<Command, Error> {
         Ok(Command::SetActive(to_sieve_name(name)?))
+    }
+
+    pub fn getscript(name: &str) -> Result<Command, Error> {
+        Ok(Command::GetScript(to_sieve_name(name)?))
     }
 
     pub fn deletescript(name: &str) -> Result<Command, Error> {
@@ -160,6 +165,7 @@ impl ToString for Command {
             }
             Command::ListScripts => "LISTSCRIPTS\r\n".into(),
             Command::SetActive(name) => format!("SETACTIVE {}\r\n", to_qs(name)),
+            Command::GetScript(name) => format!("GETSCRIPT {}\r\n", to_qs(name)),
             Command::DeleteScript(name) => format!("DELETESCRIPT {}\r\n", to_qs(name)),
             Command::RenameScript(name) => format!("RENAMESCRIPT {}\r\n", to_qs(name)),
             Command::CheckScript(name) => format!("CHECKSCRIPT {}\r\n", to_qs(name)),
@@ -238,6 +244,34 @@ fn response_oknobye(input: &str) -> Result<(&str, Response), Error> {
 
 pub fn response_authenticate(_input: &str) -> Result<OkNoBye, Error> {
     unimplemented!()
+}
+
+/// Parses the server's response after the client has sent its final
+/// SASL response. Returns `(remaining_input, optional_new_capabilities,
+/// response)`. When the OK includes new capabilities (RFC 5804 §1.6
+/// recommends servers do so after AUTH), they're returned alongside the
+/// response.
+///
+/// Local addition: upstream 0.1.1 only ships `response_authenticate`
+/// which is `unimplemented!()`, so this wrapper exposes the parser-level
+/// `response_authenticate_complete` with our domain types.
+pub fn response_authenticate_complete(
+    input: &str,
+) -> Result<(&str, Option<Vec<Capability>>, Response), Error> {
+    match crate::parser::response_authenticate_complete(input) {
+        Ok((left, (caps, resp))) => {
+            let caps = caps.map(|v| {
+                v.iter()
+                    .map(|(cap, rest)| {
+                        Capability::try_from((&**cap, rest.as_deref())).unwrap()
+                    })
+                    .collect()
+            });
+            Ok((left, caps, resp))
+        }
+        Err(nom::Err::Incomplete(_)) => Err(Error::IncompleteResponse),
+        _ => Err(Error::InvalidResponse),
+    }
 }
 
 /// Parses text returned from the server in response to the LOGOUT command.

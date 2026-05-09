@@ -14,8 +14,8 @@
 //! incomplete response`, then read more bytes and retry.
 
 use managesieve::{
-    response_capability, response_getscript, response_listscripts, response_logout, Capability,
-    Error as MsError,
+    response_authenticate_complete, response_capability, response_getscript,
+    response_listscripts, response_logout, Capability, Error as MsError,
 };
 
 use super::error::{classify_response, Error};
@@ -70,6 +70,22 @@ pub fn parse_oknobye(input: &str) -> Result<&str, Error> {
     let (rest, resp) = response_logout(input).map_err(map_parse_err)?;
     classify_response(&resp)?;
     Ok(rest)
+}
+
+/// Parse the server's response to AUTHENTICATE. Returns the new
+/// capabilities (if the server included them after auth) and any
+/// unconsumed input. On NO/BYE, returns a typed [`Error::Auth`] /
+/// [`Error::Disconnected`].
+pub fn parse_authenticate_complete(
+    input: &str,
+) -> Result<(Option<Capabilities>, &str), Error> {
+    let (rest, caps, resp) = response_authenticate_complete(input).map_err(map_parse_err)?;
+    if let Err(Error::Other(msg)) = classify_response(&resp) {
+        // Bare NO from AUTHENTICATE means auth refused; surface as Auth.
+        return Err(Error::Auth(msg));
+    }
+    classify_response(&resp)?;
+    Ok((caps.map(normalize_capabilities), rest))
 }
 
 fn normalize_capabilities(items: Vec<Capability>) -> Capabilities {
@@ -239,6 +255,56 @@ mod tests {
         assert!(caps.notify_methods.is_empty());
         assert_eq!(caps.owner, None);
         assert_eq!(caps.language, None);
+    }
+
+    // ---------- parse_authenticate_complete ----------
+
+    #[test]
+    fn auth_ok_alone_is_incomplete() {
+        // RFC 5804 lets the server reply with just OK (no inline caps).
+        // The streaming parser can't tell if more bytes are coming, so it
+        // surfaces Incomplete and the client decides via a read timeout.
+        match parse_authenticate_complete("OK\r\n") {
+            Err(Error::Protocol(msg)) => assert!(msg.contains("incomplete")),
+            other => panic!("expected incomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_ok_with_capabilities_returns_normalized_caps() {
+        let wire =
+            "OK\r\n\"IMPLEMENTATION\" \"new-impl\"\r\n\"SIEVE\" \"fileinto\"\r\nOK\r\n";
+        let (caps, rest) = parse_authenticate_complete(wire).unwrap();
+        assert_eq!(rest, "");
+        let caps = caps.expect("expected new caps after AUTH OK");
+        assert_eq!(caps.implementation.as_deref(), Some("new-impl"));
+        assert_eq!(caps.sieve_extensions, vec!["fileinto"]);
+    }
+
+    #[test]
+    fn auth_no_with_sasl_code_maps_to_auth_error() {
+        let wire = "NO (SASL) \"bad credentials\"\r\n";
+        match parse_authenticate_complete(wire) {
+            Err(Error::Auth(msg)) => assert_eq!(msg, "bad credentials"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_bare_no_maps_to_auth_error() {
+        let wire = "NO\r\n";
+        match parse_authenticate_complete(wire) {
+            Err(Error::Auth(_)) => {}
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_bye_maps_to_disconnected() {
+        match parse_authenticate_complete("BYE\r\n") {
+            Err(Error::Disconnected(_)) => {}
+            other => panic!("expected Disconnected, got {other:?}"),
+        }
     }
 
     #[test]
