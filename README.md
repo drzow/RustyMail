@@ -53,6 +53,7 @@ cp .env.example .env
 # Build all components
 cargo build --release --bin rustymail-server
 cargo build --release --bin rustymail-mcp-stdio
+cargo build --release --bin rustymail-sync
 
 # Build frontend dashboard
 cd frontend/rustymail-app-main
@@ -60,6 +61,61 @@ npm install
 npm run build
 cd ../..
 ```
+
+`rustymail-sync` is a separate process the dashboard spawns to perform
+email synchronization. If it's missing from `target/release/`, the
+dashboard's sync action will fail with
+`Failed to start sync process: No such file or directory`.
+
+### Configuring Email Accounts
+
+IMAP/SMTP credentials are read from `config/accounts.json` (the
+*single source of truth* for runtime account credentials). The `.env`
+file's `IMAP_HOST`/`IMAP_PORT`/`IMAP_USER`/`IMAP_PASS` values are still
+required by the settings loader at startup but are **not** used to
+connect to your mailbox — fill them with anything non-empty if you
+prefer (or leave them as the legacy values).
+
+```bash
+# Copy the example and edit with your account details
+cp config/accounts.json.example config/accounts.json
+# Edit config/accounts.json (gitignored) with your real credentials
+```
+
+A minimal single-account `config/accounts.json`:
+
+```json
+{
+  "version": "1.0",
+  "default_account_id": "you@example.com",
+  "accounts": [
+    {
+      "display_name": "Personal (you@example.com)",
+      "email_address": "you@example.com",
+      "provider_type": "custom",
+      "imap": {
+        "host": "imap.example.com",
+        "port": 993,
+        "username": "you@example.com",
+        "password": "your-app-password",
+        "use_tls": true
+      },
+      "smtp": null,
+      "is_active": true,
+      "created_at": "2025-10-08T12:24:12Z",
+      "updated_at": "2025-10-08T12:24:12Z"
+    }
+  ]
+}
+```
+
+Optional but recommended: set `ENCRYPTION_MASTER_KEY` in `.env`
+(generate with `openssl rand -hex 32`). When set, the dashboard
+encrypts passwords/tokens at rest the next time it writes
+`accounts.json`. Plaintext entries are accepted for backward
+compatibility.
+
+`config/accounts.json` is gitignored — never commit it.
 
 ### Running with PM2 (Recommended)
 
