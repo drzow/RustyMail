@@ -13,6 +13,7 @@ pub mod config;
 pub mod dashboard;
 pub mod error;
 pub mod imap;
+pub mod managesieve;
 pub mod mcp;
 pub mod transport;
 pub mod mcp_port;
