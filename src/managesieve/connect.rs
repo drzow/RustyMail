@@ -78,6 +78,50 @@ pub async fn connect_starttls(
     SieveClient::from_stream(tls_stream).await
 }
 
+/// Test-only variant of [`connect_starttls`] that accepts self-signed
+/// or otherwise-untrusted certificates. Compiled only under the
+/// `integration-sieve` feature so production callers can't pick it up
+/// by accident. Used by the Pigeonhole Docker fixture, which generates
+/// a fresh self-signed cert at container build time.
+///
+/// **DO NOT** ever call this from non-test code — accepting an
+/// invalid cert opens you to MITM credential theft.
+#[cfg(any(test, feature = "integration-sieve"))]
+pub async fn connect_starttls_insecure(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<SieveClient<TlsStream<TcpStream>>, Error> {
+    let tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
+        .await
+        .map_err(|_| Error::Connection(format!("connect to {host}:{port} timed out")))?
+        .map_err(|e| Error::Connection(format!("connect to {host}:{port}: {e}")))?;
+    tcp.set_nodelay(true)
+        .map_err(|e| Error::Connection(format!("set TCP_NODELAY: {e}")))?;
+
+    let mut client = SieveClient::from_stream(tcp).await?;
+    if !client.capabilities().starttls {
+        return Err(Error::Protocol(
+            "server does not advertise STARTTLS".into(),
+        ));
+    }
+    client.starttls_request().await?;
+    let tcp = client.into_inner()?;
+
+    let native_connector = TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+        .map_err(|e| Error::Connection(format!("build TLS connector: {e}")))?;
+    let connector = TokioTlsConnector::from(native_connector);
+    let tls_stream = tokio::time::timeout(timeout, connector.connect(host, tcp))
+        .await
+        .map_err(|_| Error::Connection("TLS handshake timed out".into()))?
+        .map_err(|e| Error::Connection(format!("TLS handshake: {e}")))?;
+
+    SieveClient::from_stream(tls_stream).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

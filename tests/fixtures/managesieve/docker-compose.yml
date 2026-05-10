@@ -1,0 +1,23 @@
+# docker-compose.yml — bring up the Pigeonhole fixture for the
+# integration-sieve test target.
+#
+#   docker compose -f tests/fixtures/managesieve/docker-compose.yml up -d --build
+#   cargo test --features integration-sieve --test integration_sieve -- --nocapture
+#   docker compose -f tests/fixtures/managesieve/docker-compose.yml down
+#
+# The container is rebuilt on `up --build` because the self-signed
+# cert is regenerated each time. The test connects to localhost:4190
+# with danger_accept_invalid_certs.
+
+services:
+  sieve:
+    build: .
+    image: rustymail-sieve-test:local
+    container_name: rustymail-sieve-test
+    ports:
+      - "127.0.0.1:4190:4190"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4190 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 5

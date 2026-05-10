@@ -26,11 +26,13 @@
 //!
 //! ## Servers that omit post-AUTH capabilities
 //! RFC 5804 §1.6 says a server MAY reply to AUTHENTICATE with new
-//! capabilities, and notes most do. Servers that send a bare `OK\r\n`
-//! and then go quiet will currently leave `authenticate_plain` parked
-//! waiting for more bytes. Cyrus/Dovecot (Pigeonhole) both send
-//! capabilities, so this only matters against unusual servers — we'll
-//! add a read timeout if it ever bites us.
+//! capabilities, but real-world servers disagree on this. Cyrus sends
+//! inline caps; Pigeonhole 2.3 sometimes sends just `OK\r\n` and goes
+//! silent. `authenticate_plain` consumes the OK first, then peeks for
+//! optional inline caps with a short read timeout, so both behaviors
+//! work without parking the client.
+
+use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use managesieve::Command;
@@ -38,13 +40,19 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::error::Error;
 use super::parser::{
-    parse_authenticate_complete, parse_capabilities, parse_getscript, parse_listscripts,
-    parse_oknobye,
+    parse_capabilities, parse_getscript, parse_listscripts, parse_oknobye,
 };
 use super::types::Capabilities;
 
 /// How many bytes we read off the wire per syscall.
 const READ_BUF_SIZE: usize = 4096;
+
+/// After AUTHENTICATE OK, some servers send a fresh capability listing
+/// inline (Cyrus does), and others send nothing more (Dovecot/Pigeonhole
+/// 2.3 in some configurations). This timeout bounds how long we wait
+/// for those optional capabilities before assuming the server isn't
+/// going to send any.
+const POST_AUTH_CAPS_GRACE: Duration = Duration::from_millis(150);
 
 pub struct SieveClient<S> {
     stream: S,
@@ -76,15 +84,22 @@ where
     }
 
     /// SASL PLAIN authentication. Sends an empty authzid, the username,
-    /// and the password as a single non-synchronizing literal. Updates
-    /// `self.capabilities` if the server returns inline caps after OK.
+    /// and the password as a single non-synchronizing literal.
+    ///
+    /// RFC 5804 §1.6 says servers MAY send a fresh capability listing
+    /// after AUTHENTICATE OK, and most do — but real-world servers
+    /// disagree on this. Cyrus sends inline caps; Pigeonhole 2.3
+    /// sometimes sends just a bare OK and waits silently for the next
+    /// command. To handle both, we consume the OK/NO/BYE first, then
+    /// peek for inline caps with a short read timeout. The timeout is
+    /// bounded so a server that never sends caps doesn't park us.
     pub async fn authenticate_plain(
         &mut self,
         user: &str,
         password: &str,
     ) -> Result<(), Error> {
         // RFC 4616: PLAIN payload is \0<authzid>\0<authcid>\0<password>.
-        // We send empty authzid which means "act as authcid".
+        // Empty authzid means "act as authcid".
         let mut data = Vec::with_capacity(2 + user.len() + password.len());
         data.push(0);
         data.extend_from_slice(user.as_bytes());
@@ -98,10 +113,30 @@ where
         );
         self.write_bytes(cmd.as_bytes()).await?;
 
-        let maybe_caps = self.read_response(parse_authenticate_complete).await?;
-        if let Some(caps) = maybe_caps {
+        // Phase 1: consume the OK / NO / BYE. NO and bare BYE during
+        // AUTH are both auth refusals from the user's perspective.
+        match self.read_response(parse_oknobye).await {
+            Ok(()) => {}
+            Err(Error::Other(msg)) | Err(Error::Disconnected(msg)) => {
+                return Err(Error::Auth(msg));
+            }
+            Err(other) => return Err(other),
+        }
+
+        // Phase 2: try to consume inline capabilities, but only for as
+        // long as POST_AUTH_CAPS_GRACE. If they don't arrive, the
+        // server isn't going to send any — leave self.capabilities at
+        // its pre-auth value (the greeting).
+        let caps_result = tokio::time::timeout(
+            POST_AUTH_CAPS_GRACE,
+            self.read_response(parse_capabilities),
+        )
+        .await;
+        if let Ok(Ok(caps)) = caps_result {
             self.capabilities = caps;
         }
+        // Timeout, parse error, or transport error during the grace
+        // window are all benign — the AUTH itself already succeeded.
         Ok(())
     }
 
@@ -133,7 +168,7 @@ where
     pub async fn put_script(&mut self, name: &str, body: &str) -> Result<(), Error> {
         let cmd = Command::put_script(name, body).map_err(invalid_name(name))?;
         self.write_command(&cmd).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// CHECKSCRIPT — validate a script body without storing it.
@@ -141,7 +176,7 @@ where
         let cmd = Command::checkscript(body)
             .map_err(|_| Error::Protocol("invalid CHECKSCRIPT body".into()))?;
         self.write_command(&cmd).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// SETACTIVE — make `name` the active script. Pass an empty string
@@ -149,7 +184,7 @@ where
     pub async fn set_active(&mut self, name: &str) -> Result<(), Error> {
         let cmd = Command::set_active(name).map_err(invalid_name(name))?;
         self.write_command(&cmd).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// SETACTIVE "" — convenience wrapper for deactivating the active
@@ -163,19 +198,19 @@ where
     pub async fn delete_script(&mut self, name: &str) -> Result<(), Error> {
         let cmd = Command::deletescript(name).map_err(invalid_name(name))?;
         self.write_command(&cmd).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// NOOP — round-trip ping.
     pub async fn noop(&mut self) -> Result<(), Error> {
         self.write_command(&Command::noop()).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// LOGOUT — send LOGOUT, await OK, drop the stream.
     pub async fn logout(mut self) -> Result<(), Error> {
         self.write_command(&Command::logout()).await?;
-        self.read_response(unit(parse_oknobye)).await?;
+        self.read_response(parse_oknobye).await?;
         Ok(())
     }
 
@@ -189,7 +224,7 @@ where
     /// helper for the full upgrade flow.
     pub async fn starttls_request(&mut self) -> Result<(), Error> {
         self.write_command(&Command::start_tls()).await?;
-        self.read_response(unit(parse_oknobye)).await
+        self.read_response(parse_oknobye).await
     }
 
     /// Surrender the underlying stream so a caller can perform a TLS
@@ -228,14 +263,22 @@ where
     /// Drive `parser` against the current buffer, reading more bytes
     /// from the stream whenever it returns `Error::Protocol("incomplete
     /// response")`. Drains consumed bytes from the buffer on success.
+    /// Drive `parser` against the current buffer, reading more bytes
+    /// from the stream whenever it returns `Error::Protocol("incomplete
+    /// response")`.
+    ///
+    /// Crucially, the parser's outer `Result` carries the consumed-byte
+    /// count via the `&str` rest, while its inner `Result` carries the
+    /// classified outcome (Ok value or NO/BYE error). We drain the
+    /// buffer **regardless of the inner outcome** — that's what keeps
+    /// the next command's response from being polluted by leftover
+    /// bytes after a server error.
     async fn read_response<P, T>(&mut self, parser: P) -> Result<T, Error>
     where
-        P: Fn(&str) -> Result<(T, &str), Error>,
+        P: Fn(&str) -> Result<(Result<T, Error>, &str), Error>,
     {
         loop {
-            // Try the parser without holding any borrows of self.buffer
-            // across the await.
-            let outcome: Result<Option<(T, usize)>, Error> = {
+            let outcome: Result<Option<(Result<T, Error>, usize)>, Error> = {
                 let utf8_prefix = match std::str::from_utf8(&self.buffer) {
                     Ok(s) => s,
                     Err(e) => {
@@ -248,9 +291,9 @@ where
                     Ok(None)
                 } else {
                     match parser(utf8_prefix) {
-                        Ok((value, rest)) => {
+                        Ok((inner, rest)) => {
                             let consumed = utf8_prefix.len() - rest.len();
-                            Ok(Some((value, consumed)))
+                            Ok(Some((inner, consumed)))
                         }
                         Err(Error::Protocol(m)) if m.contains("incomplete") => Ok(None),
                         Err(e) => Err(e),
@@ -258,9 +301,9 @@ where
                 }
             };
             match outcome? {
-                Some((value, consumed)) => {
+                Some((inner, consumed)) => {
                     self.buffer.drain(..consumed);
-                    return Ok(value);
+                    return inner;
                 }
                 None => self.recv_chunk().await?,
             }
@@ -280,15 +323,6 @@ where
         self.buffer.extend_from_slice(&buf[..n]);
         Ok(())
     }
-}
-
-/// Adapter so `parse_oknobye` (which returns `&str` only) fits the
-/// `read_response` signature that expects `(T, &str)`.
-fn unit<F>(f: F) -> impl Fn(&str) -> Result<((), &str), Error>
-where
-    F: Fn(&str) -> Result<&str, Error>,
-{
-    move |s| f(s).map(|rest| ((), rest))
 }
 
 fn invalid_name(name: &str) -> impl FnOnce(managesieve::Error) -> Error + '_ {

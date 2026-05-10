@@ -179,6 +179,9 @@ default = []
 integration_tests = []
 # Feature flag for enabling live integration tests
 live_tests = []
+# Feature flag for ManageSieve integration tests against a live
+# Dovecot/Pigeonhole container. See tests/fixtures/managesieve/README.md.
+integration-sieve = []
 # Feature flag for heap profiling with DHAT
 dhat-heap = ["dep:dhat"]
 # Feature flag to use system allocator instead of jemalloc (for testing memory behavior)
@@ -217,3 +220,8 @@ path = "tests/integration/mod.rs"
 [[test]]
 name = "e2e"
 path = "tests/e2e/mod.rs"
+
+[[test]]
+name = "integration_sieve"
+path = "tests/integration_sieve.rs"
+required-features = ["integration-sieve"]

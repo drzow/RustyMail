@@ -121,8 +121,13 @@ impl Command {
         Ok(Command::RenameScript(to_sieve_name(name)?))
     }
 
-    pub fn checkscript(name: &str) -> Result<Command, Error> {
-        Ok(Command::CheckScript(to_sieve_name(name)?))
+    /// CHECKSCRIPT takes a script *body*, not a script name — the body
+    /// can contain CRLF and other characters that `to_sieve_name`
+    /// rejects, and the wire form uses a literal, not a quoted string.
+    /// Local fix: upstream 0.1.1 incorrectly validated the body as a
+    /// sieve name.
+    pub fn checkscript(body: &str) -> Result<Command, Error> {
+        Ok(Command::CheckScript(body.to_owned()))
     }
 
     pub fn noop() -> Command {
@@ -168,7 +173,14 @@ impl ToString for Command {
             Command::GetScript(name) => format!("GETSCRIPT {}\r\n", to_qs(name)),
             Command::DeleteScript(name) => format!("DELETESCRIPT {}\r\n", to_qs(name)),
             Command::RenameScript(name) => format!("RENAMESCRIPT {}\r\n", to_qs(name)),
-            Command::CheckScript(name) => format!("CHECKSCRIPT {}\r\n", to_qs(name)),
+            // Local fix: upstream encoded CHECKSCRIPT's argument as a
+            // quoted string, but bodies may contain CRLF / control
+            // bytes. Per RFC 5804 §2.10 the argument is `sieve-script`,
+            // which is a `string` (quoted-string OR literal); we always
+            // use the literal form because it's safe for any payload.
+            Command::CheckScript(body) => {
+                format!("CHECKSCRIPT {}\r\n", to_lit_c2s(body))
+            }
             Command::Noop => "NOOP\r\n".into(),
             Command::UnAuthenticate => "UNAUTHENTICATE\r\n".into(),
         }

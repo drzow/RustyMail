@@ -254,7 +254,12 @@ pub fn response_ok(input: &str) -> IResult<&str, Response> {
             tuple((
                 ok,
                 opt(preceded(space1, code)),
-                opt(preceded(space1, quoted_string)),
+                // Local fix: upstream only accepted quoted-string for
+                // the human-readable response text. Pigeonhole sends
+                // CHECKSCRIPT error messages in literal form because
+                // they contain CRLF, so we use sievestring_s2c which
+                // accepts either form.
+                opt(preceded(space1, sievestring_s2c)),
             )),
             |(_, code, human)| Response {
                 tag: OkNoBye::Ok,
@@ -272,7 +277,12 @@ pub fn response_nobye(input: &str) -> IResult<&str, Response> {
             tuple((
                 nobye,
                 opt(preceded(space1, code)),
-                opt(preceded(space1, quoted_string)),
+                // Local fix: upstream only accepted quoted-string for
+                // the human-readable response text. Pigeonhole sends
+                // CHECKSCRIPT error messages in literal form because
+                // they contain CRLF, so we use sievestring_s2c which
+                // accepts either form.
+                opt(preceded(space1, sievestring_s2c)),
             )),
             |(oknobye, code, human)| Response {
                 tag: oknobye,
