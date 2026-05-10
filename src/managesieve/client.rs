@@ -179,6 +179,34 @@ where
         Ok(())
     }
 
+    /// STARTTLS — send STARTTLS, await OK. The caller is responsible for
+    /// the TLS handshake on the underlying stream and for constructing a
+    /// fresh `SieveClient` on the upgraded stream (RFC 5804 §2.2 says
+    /// the server resends capabilities after the handshake).
+    ///
+    /// This method does NOT perform the TLS handshake itself; it only
+    /// drives the protocol-level command. Use the `connect_starttls`
+    /// helper for the full upgrade flow.
+    pub async fn starttls_request(&mut self) -> Result<(), Error> {
+        self.write_command(&Command::start_tls()).await?;
+        self.read_response(unit(parse_oknobye)).await
+    }
+
+    /// Surrender the underlying stream so a caller can perform a TLS
+    /// upgrade after a STARTTLS exchange. Returns `Error::Protocol` if
+    /// any unconsumed bytes remain in the read buffer (which would
+    /// happen only if the server sent data after STARTTLS OK, which it
+    /// must not per RFC 5804 §2.2).
+    pub fn into_inner(self) -> Result<S, Error> {
+        if !self.buffer.is_empty() {
+            return Err(Error::Protocol(format!(
+                "server sent {} bytes after STARTTLS OK; refusing TLS upgrade",
+                self.buffer.len()
+            )));
+        }
+        Ok(self.stream)
+    }
+
     // ---------- internal helpers ----------
 
     async fn write_command(&mut self, cmd: &Command) -> Result<(), Error> {
@@ -469,6 +497,36 @@ mod tests {
         });
         let mut client = SieveClient::from_stream(client_stream).await.unwrap();
         client.noop().await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn starttls_request_sends_command_and_reads_ok() {
+        let (server, client_stream) = tokio::io::duplex(8192);
+        let task = fake_server(server, |mut s| async move {
+            s.write_all(b"\"IMPLEMENTATION\" \"x\"\r\n\"STARTTLS\"\r\nOK\r\n")
+                .await
+                .unwrap();
+            expect_recv(&mut s, b"STARTTLS\r\n").await;
+            s.write_all(b"OK\r\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        let mut client = SieveClient::from_stream(client_stream).await.unwrap();
+        assert!(client.capabilities().starttls);
+        client.starttls_request().await.unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn into_inner_returns_stream_when_buffer_empty() {
+        let (server, client_stream) = tokio::io::duplex(8192);
+        let task = fake_server(server, |mut s| async move {
+            s.write_all(b"\"IMPLEMENTATION\" \"x\"\r\nOK\r\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        let client = SieveClient::from_stream(client_stream).await.unwrap();
+        // After the greeting, all bytes have been consumed by the parser.
+        let _stream = client.into_inner().expect("buffer should be empty after greeting");
         task.await.unwrap();
     }
 

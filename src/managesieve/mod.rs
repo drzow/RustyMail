@@ -10,10 +10,16 @@
 //! domain types. MCP tool surface lives in `crate::mcp::adapters::sieve`.
 
 pub mod client;
+pub mod connect;
+pub mod credentials;
 pub mod error;
+pub mod mcp_tools;
 pub mod parser;
+pub mod tool_schemas;
 pub mod types;
 
 pub use client::SieveClient;
+pub use connect::{connect_starttls, DEFAULT_PORT, DEFAULT_TIMEOUT};
+pub use credentials::{resolve_for_account, SieveCredentials};
 pub use error::Error;
 pub use types::{Capabilities, SieveScript};

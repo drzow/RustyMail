@@ -140,7 +140,24 @@ impl ServerHandler for RustyMailService {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.execute_legacy_tool(request.name.to_string(), request.arguments.and_then(|m| m.into_iter().next().map(|(_, v)| v))).await
+        let name = request.name.to_string();
+        // Sieve tools have their own connection lifecycle (open
+        // ManageSieve session, authenticate, run op, log out) and
+        // bypass the IMAP-coupled legacy tool registry.
+        if name.starts_with(crate::managesieve::tool_schemas::PREFIX) {
+            let args_value = request
+                .arguments
+                .map(|m| Value::Object(m.into_iter().collect()))
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            return self.dispatch_sieve_tool(name, args_value).await;
+        }
+        self.execute_legacy_tool(
+            name,
+            request
+                .arguments
+                .and_then(|m| m.into_iter().next().map(|(_, v)| v)),
+        )
+        .await
     }
 
     async fn list_tools(
@@ -151,12 +168,13 @@ impl ServerHandler for RustyMailService {
         // Pull tool definitions from the actual source of truth (handlers.rs + high_level_tools.rs)
         let low_level = crate::dashboard::api::handlers::get_mcp_tools_jsonrpc_format();
         let high_level = crate::dashboard::api::high_level_tools::get_mcp_high_level_tools_jsonrpc_format();
+        let sieve = crate::managesieve::tool_schemas::sieve_tool_definitions();
 
         let mut seen_names = std::collections::HashSet::new();
         let mut items: Vec<Tool> = Vec::new();
 
         // Convert JSON tool definitions to rmcp Tool structs, deduplicating by name
-        for tool_json in low_level.iter().chain(high_level.iter()) {
+        for tool_json in low_level.iter().chain(high_level.iter()).chain(sieve.iter()) {
             let name = tool_json.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
             if !seen_names.insert(name.to_string()) {
                 continue; // Skip duplicates (high-level tools that also exist in low-level)
@@ -185,6 +203,72 @@ impl ServerHandler for RustyMailService {
             next_cursor: None,
             meta: None,
         })
+    }
+}
+
+impl RustyMailService {
+    /// Dispatch a sieve_* tool: resolve credentials, open a TLS-upgraded
+    /// ManageSieve session, run the operation, log out, return the
+    /// JSON result wrapped as MCP content. Each call opens and closes
+    /// its own connection (no pooling in v1).
+    async fn dispatch_sieve_tool(
+        &self,
+        tool_name: String,
+        args: Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        debug!("Executing sieve tool '{}' via SDK", tool_name);
+
+        let creds = match resolve_sieve_credentials() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("sieve credentials lookup failed: {e}");
+                return Err(ErrorData::new(
+                    ErrorCode(-32603),
+                    format!("sieve credentials: {e}"),
+                    None,
+                ));
+            }
+        };
+
+        match crate::managesieve::mcp_tools::execute_sieve_tool(&creds, &tool_name, &args).await {
+            Ok(value) => {
+                let text = serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|_| "null".to_string());
+                let content = Content {
+                    raw: RawContent::Text(RawTextContent { text, meta: None }),
+                    annotations: None,
+                };
+                Ok(CallToolResult::success(vec![content]))
+            }
+            Err(e) => {
+                let code = sieve_error_code(&e);
+                Err(ErrorData::new(ErrorCode(code), e.to_string(), None))
+            }
+        }
+    }
+}
+
+/// Resolve sieve credentials at request time (so env-var changes are
+/// picked up without restarting the MCP server). Reads
+/// `RUSTYMAIL_ACCOUNTS_PATH` (default `config/accounts.json`) and
+/// `RUSTYMAIL_SIEVE_ACCOUNT` (default = file's `default_account_id`).
+fn resolve_sieve_credentials() -> Result<crate::managesieve::SieveCredentials, crate::managesieve::Error> {
+    let path = std::env::var("RUSTYMAIL_ACCOUNTS_PATH")
+        .unwrap_or_else(|_| "config/accounts.json".to_string());
+    let account_id = std::env::var("RUSTYMAIL_SIEVE_ACCOUNT").ok();
+    crate::managesieve::resolve_for_account(&path, account_id.as_deref())
+}
+
+/// Map our typed sieve errors to JSON-RPC error codes. Semantic
+/// failures (script not found, etc.) get -32602 (invalid params);
+/// auth failures get -32001 (custom); everything else falls through
+/// to -32603 (internal error).
+fn sieve_error_code(e: &crate::managesieve::Error) -> i32 {
+    use crate::managesieve::Error::*;
+    match e {
+        ScriptNotFound(_) | ScriptAlreadyExists(_) | ScriptActive(_) => -32602,
+        Auth(_) => -32001,
+        _ => -32603,
     }
 }
 
