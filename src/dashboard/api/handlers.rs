@@ -4734,7 +4734,12 @@ pub async fn trigger_email_sync(
                     }
                 }
                 Ok(None) => {
-                    // Still running - this is the normal case
+                    // Still running - this is the normal case. Detach a reaper so
+                    // the sync process is waited on when it exits instead of being
+                    // left as a zombie (nothing else waits on this child).
+                    tokio::task::spawn_blocking(move || {
+                        let _ = child.wait();
+                    });
                     Ok(HttpResponse::Ok().json(serde_json::json!({
                         "message": format!("Email sync started for {}", mode_desc),
                         "status": "syncing",
@@ -4743,7 +4748,10 @@ pub async fn trigger_email_sync(
                 }
                 Err(e) => {
                     error!("Failed to check sync process status: {}", e);
-                    // Assume it's running
+                    // Assume it's running; still reap it on exit to avoid a zombie.
+                    tokio::task::spawn_blocking(move || {
+                        let _ = child.wait();
+                    });
                     Ok(HttpResponse::Ok().json(serde_json::json!({
                         "message": format!("Email sync started for {}", mode_desc),
                         "status": "syncing",

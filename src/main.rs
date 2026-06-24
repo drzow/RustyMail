@@ -404,8 +404,14 @@ fn start_sync_process_spawner() {
             };
 
             match std::process::Command::new(sync_binary).spawn() {
-                Ok(child) => {
+                Ok(mut child) => {
                     info!("Spawned sync process (pid: {:?})", child.id());
+                    // Reap the child once it exits. std::process::Child does not
+                    // reap on drop and nothing else waits on it, so without this
+                    // every finished sync process lingers as a zombie.
+                    tokio::task::spawn_blocking(move || {
+                        let _ = child.wait();
+                    });
                 }
                 Err(e) => {
                     error!("Failed to spawn sync process '{}': {}", sync_binary, e);
