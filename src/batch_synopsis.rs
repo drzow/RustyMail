@@ -220,8 +220,18 @@ pub fn generate_synopsis(body_text: Option<&str>, max_chars: usize) -> String {
         _ => return "(no body text available)".to_string(),
     };
 
-    // Take first ~500 chars of source to work with
-    let source = if text.len() > 500 { &text[..500] } else { text };
+    // Take first ~500 bytes of source to work with, snapping back to a valid
+    // UTF-8 char boundary so multi-byte characters (e.g. the \u{a0} spacers
+    // common in marketing email) are never sliced through (would panic).
+    let source = if text.len() > 500 {
+        let mut end = 500;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
 
     // Clean up: collapse whitespace, strip blank lines
     let cleaned: String = source
@@ -297,6 +307,16 @@ mod tests {
         let text = "Line one.\n\n  Line two.  \n\n\nLine three.";
         let result = generate_synopsis(Some(text), 300);
         assert_eq!(result, "Line one. Line two. Line three.");
+    }
+
+    #[test]
+    fn test_synopsis_multibyte_char_straddling_500_byte_cutoff() {
+        // Regression: a multi-byte char (U+00A0, 2 bytes at indices 499..501)
+        // straddling the 500-byte source cutoff must not panic on a byte slice.
+        let text = format!("{}\u{a0}{}", "a".repeat(499), "b".repeat(200));
+        assert!(text.len() > 500);
+        let result = generate_synopsis(Some(&text), 80);
+        assert!(result.ends_with("..."));
     }
 
     #[test]

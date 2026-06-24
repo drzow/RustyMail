@@ -248,7 +248,13 @@ fn generate_synopsis(body_text: &Option<String>) -> String {
         }
     }
     if result.len() > 500 {
-        result.truncate(500);
+        // Snap back to a valid UTF-8 char boundary; String::truncate panics
+        // if the new length lands inside a multi-byte character.
+        let mut end = 500;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
     }
     result
 }
@@ -276,7 +282,13 @@ pub(crate) fn sanitize_filename(input: &str) -> String {
         }
     }).collect();
     if sanitized.len() > 50 {
-        sanitized[..50].to_string()
+        // Snap back to a valid UTF-8 char boundary; char::is_alphanumeric()
+        // keeps multi-byte letters, so a raw byte slice at 50 could panic.
+        let mut end = 50;
+        while end > 0 && !sanitized.is_char_boundary(end) {
+            end -= 1;
+        }
+        sanitized[..end].to_string()
     } else {
         sanitized
     }
@@ -296,6 +308,24 @@ mod tests {
         let text = Some("Hello world.\nThis is line two.\n\nLine four.".to_string());
         let result = generate_synopsis(&text);
         assert_eq!(result, "Hello world. This is line two. Line four.");
+    }
+
+    #[test]
+    fn test_generate_synopsis_multibyte_at_500_truncate() {
+        // Regression: U+00A0 (2 bytes) straddling byte 500 must not panic
+        // String::truncate.
+        let line = format!("{}\u{a0}{}", "a".repeat(499), "b".repeat(200));
+        let result = generate_synopsis(&Some(line));
+        assert!(result.len() <= 500);
+    }
+
+    #[test]
+    fn test_sanitize_filename_multibyte_at_cutoff() {
+        // Regression: a multi-byte alphanumeric (U+00E9 'é') straddling byte 50
+        // must not panic the truncation slice.
+        let input = format!("{}\u{e9}xxxx", "a".repeat(49));
+        let result = sanitize_filename(&input);
+        assert!(result.len() <= 50);
     }
 
     #[test]
