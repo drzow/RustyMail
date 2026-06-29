@@ -248,7 +248,7 @@ pub fn get_mcp_high_level_tools_jsonrpc_format() -> Vec<Value> {
         }),
         json!({
             "name": "search_by_domain",
-            "description": "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org')",
+            "description": "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org'). Results are scoped to one folder (default INBOX) so the returned UIDs are directly usable in that folder; each result also includes its 'folder'. IMAP UIDs are per-folder, so always act on a UID within the folder reported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -259,6 +259,10 @@ pub fn get_mcp_high_level_tools_jsonrpc_format() -> Vec<Value> {
                     "domain": {
                         "type": "string",
                         "description": "REQUIRED. Domain to search for (e.g., 'gmail.com')"
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional. Folder to search (default: INBOX). Returned UIDs are valid only within this folder."
                     },
                     "search_in": {
                         "type": "array",

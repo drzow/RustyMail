@@ -608,3 +608,59 @@ async fn test_address_report_filters_exchange_addresses() {
 
     cleanup_test_db(test_name);
 }
+
+// Regression test for the cross-folder UID collision bug in search_by_domain.
+// IMAP UIDs are unique only within a folder, so a domain hit in (say) Archive
+// must never be returned as if its UID were valid in INBOX. The fix scopes the
+// search to a folder and tags every result with its folder name.
+#[tokio::test]
+#[serial]
+async fn test_search_by_domain_is_folder_scoped() {
+    let test_name = "search_by_domain_scoped";
+    cleanup_test_db(test_name);
+
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    // Same UID (100) lives in two folders pointing at DIFFERENT senders:
+    //   Archive/100 -> deals@kaboodle.com   (a defunct sender, only archived)
+    //   INBOX/100   -> boss@example.com      (a real live inbox message)
+    let archived = create_test_email(100, "Old kaboodle promo", "deals@kaboodle.com");
+    service.cache_email("Archive", &archived, account_id).await.unwrap();
+    let live = create_test_email(100, "Important", "boss@example.com");
+    service.cache_email("INBOX", &live, account_id).await.unwrap();
+    // A genuine kaboodle message that IS in the inbox, under a different UID.
+    let inbox_kaboodle = create_test_email(7, "Inbox kaboodle", "news@kaboodle.com");
+    service.cache_email("INBOX", &inbox_kaboodle, account_id).await.unwrap();
+
+    // INBOX-scoped (the default): must return ONLY the inbox kaboodle (uid 7),
+    // never the Archive uid 100 — which would collide with INBOX's real uid 100.
+    let inbox_hits = service
+        .search_by_domain("kaboodle.com", &["from"], account_id, Some("INBOX"), 50)
+        .await
+        .unwrap();
+    assert_eq!(inbox_hits.len(), 1, "INBOX scope should return exactly the inbox kaboodle");
+    assert_eq!(inbox_hits[0].0.uid, 7, "Must be the inbox UID, not the archived collision");
+    assert_eq!(inbox_hits[0].1, "INBOX", "Result must be tagged with its folder");
+
+    // Archive-scoped: returns the archived one, tagged Archive.
+    let archive_hits = service
+        .search_by_domain("kaboodle.com", &["from"], account_id, Some("Archive"), 50)
+        .await
+        .unwrap();
+    assert_eq!(archive_hits.len(), 1, "Archive scope should return the archived kaboodle");
+    assert_eq!(archive_hits[0].0.uid, 100);
+    assert_eq!(archive_hits[0].1, "Archive");
+
+    // All-folders search (None): returns both, each unambiguously folder-tagged.
+    let all_hits = service
+        .search_by_domain("kaboodle.com", &["from"], account_id, None, 50)
+        .await
+        .unwrap();
+    assert_eq!(all_hits.len(), 2, "All-folders search should find both kaboodle messages");
+    let mut tagged: Vec<(u32, String)> = all_hits.iter().map(|(e, f)| (e.uid, f.clone())).collect();
+    tagged.sort();
+    assert_eq!(tagged, vec![(7u32, "INBOX".to_string()), (100u32, "Archive".to_string())]);
+
+    cleanup_test_db(test_name);
+}

@@ -1333,8 +1333,17 @@ impl CacheService {
         Ok(emails)
     }
 
-    /// Search cached emails by sender/recipient domain
-    pub async fn search_by_domain(&self, domain: &str, search_in: &[&str], account_id: &str, limit: usize) -> Result<Vec<CachedEmail>, CacheError> {
+    /// Search cached emails by sender/recipient domain.
+    ///
+    /// IMPORTANT: IMAP UIDs are unique only WITHIN a folder. To stop callers
+    /// conflating a UID from one folder with the same-numbered UID in another
+    /// (the cross-folder collision bug), this method:
+    ///   * scopes results to a single folder when `folder` is `Some(name)`
+    ///     (the common case — callers then act on those UIDs in that folder), and
+    ///   * always returns each match paired with the name of the folder its UID
+    ///     belongs to, so even an all-folders search (`folder = None`) is
+    ///     unambiguous.
+    pub async fn search_by_domain(&self, domain: &str, search_in: &[&str], account_id: &str, folder: Option<&str>, limit: usize) -> Result<Vec<(CachedEmail, String)>, CacheError> {
         let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
         let domain_pattern = format!("%@{}%", domain.to_lowercase());
 
@@ -1352,22 +1361,26 @@ impl CacheService {
         }
 
         let where_clause = conditions.join(" OR ");
+        let folder_filter = if folder.is_some() { " AND f.name = ?" } else { "" };
         let sql = format!(
             "SELECT e.id, e.folder_id, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                     e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                     e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
-                    e.in_reply_to, e.references_header, e.attachment_parts
+                    e.in_reply_to, e.references_header, e.attachment_parts, f.name AS folder_name
              FROM emails e
              JOIN folders f ON e.folder_id = f.id
-             WHERE f.account_id = ? AND ({})
+             WHERE f.account_id = ? AND ({}){}
              ORDER BY COALESCE(e.date, e.internal_date) DESC
              LIMIT ?",
-            where_clause
+            where_clause, folder_filter
         );
 
         let mut query = sqlx::query(&sql).bind(account_id);
         for _ in &conditions {
             query = query.bind(&domain_pattern);
+        }
+        if let Some(folder_name) = folder {
+            query = query.bind(folder_name);
         }
         query = query.bind(limit as i64);
 
@@ -1377,7 +1390,8 @@ impl CacheService {
             let to_str: String = row.get("to_addresses");
             let cc_str: String = row.get("cc_addresses");
             let flags_str: String = row.get("flags");
-            emails.push(CachedEmail {
+            let folder_name: String = row.get("folder_name");
+            emails.push((CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
                 uid: row.get::<i64, _>("uid") as u32,
@@ -1398,7 +1412,7 @@ impl CacheService {
                 in_reply_to: row.get("in_reply_to"),
                 references_header: row.get("references_header"),
                 attachment_parts: row.get("attachment_parts"),
-            });
+            }, folder_name));
         }
         Ok(emails)
     }

@@ -769,7 +769,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "search_by_domain",
-            "description": "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org')",
+            "description": "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org'). Results are scoped to one folder (default INBOX) so the returned UIDs are directly usable in that folder; each result also includes its 'folder'. IMAP UIDs are per-folder, so always act on a UID within the folder reported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -780,6 +780,10 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
                     "domain": {
                         "type": "string",
                         "description": "REQUIRED. Domain to search for (e.g., 'gmail.com')"
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional. Folder to search (default: INBOX). Returned UIDs are valid only within this folder."
                     },
                     "search_in": {
                         "type": "array",
@@ -1329,10 +1333,11 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "search_by_domain",
-            "description": "Search cached emails by sender/recipient domain",
+            "description": "Search cached emails by sender/recipient domain. Scoped to one folder (default INBOX); each result includes its 'folder'. IMAP UIDs are per-folder.",
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "domain": "REQUIRED. Domain to search for (e.g., 'gmail.com')",
+                "folder": "Optional. Folder to search (default: INBOX). Returned UIDs are valid only within this folder.",
                 "search_in": "Optional. Array of fields: 'from', 'to', 'cc' (default: ['from'])",
                 "limit": "Optional. Max results (default: 50)"
             }
@@ -3417,13 +3422,17 @@ pub async fn execute_mcp_tool_inner(
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
                 .unwrap_or_else(|| vec!["from"]);
+            // Scope to a single folder so the returned per-folder IMAP UIDs are
+            // directly actionable in that folder; default to INBOX.
+            let folder = params.get("folder").and_then(|v| v.as_str()).unwrap_or("INBOX").to_string();
             let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
-            match state.cache_service.search_by_domain(&domain, &search_in, &account_id, limit).await {
+            match state.cache_service.search_by_domain(&domain, &search_in, &account_id, Some(&folder), limit).await {
                 Ok(emails) => {
-                    let results: Vec<serde_json::Value> = emails.iter().map(|e| {
+                    let results: Vec<serde_json::Value> = emails.iter().map(|(e, folder_name)| {
                         serde_json::json!({
                             "uid": e.uid,
+                            "folder": folder_name,
                             "subject": e.subject,
                             "from_address": e.from_address,
                             "from_name": e.from_name,
@@ -3436,6 +3445,7 @@ pub async fn execute_mcp_tool_inner(
                         "success": true,
                         "data": {
                             "domain": domain,
+                            "folder": folder,
                             "count": results.len(),
                             "emails": results,
                         },
