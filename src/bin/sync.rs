@@ -327,6 +327,11 @@ async fn sync_folder(
         get_last_uid(pool, folder_name, account_email).await?
     };
 
+    // A full sync (force, or the very first sync) searches ALL, so `uids` will
+    // be the COMPLETE live UID set for the folder — the precondition for safely
+    // pruning dead cache rows. Incremental syncs only see new UIDs and must not.
+    let full_sync = last_uid_synced == 0;
+
     // Search for new emails (force mode fetches ALL)
     let search_criteria = if last_uid_synced > 0 {
         format!("UID {}:*", last_uid_synced + 1)
@@ -338,6 +343,14 @@ async fn sync_folder(
 
     if uids.is_empty() {
         debug!("No new emails in folder {}", folder_name);
+        // On a full sync, an empty live folder means every cached row is dead.
+        if full_sync {
+            match prune_dead_rows(pool, folder_name, account_email, &uids).await {
+                Ok(n) if n > 0 => info!("Pruned {} dead cache row(s) from now-empty folder {}", n, folder_name),
+                Ok(_) => {}
+                Err(e) => warn!("Failed to prune dead rows for {}: {}", folder_name, e),
+            }
+        }
         return Ok(());
     }
 
@@ -381,8 +394,68 @@ async fn sync_folder(
     // Update sync state
     update_sync_state(pool, folder_name, max_uid, account_email).await?;
 
+    // After a full sync, `uids` is the complete live UID set for the folder, so
+    // any cached row whose UID is absent belongs to a message that has left the
+    // folder (moved or deleted server-side). Remove those dead rows so counts
+    // and get_folder_stats reflect the live mailbox instead of inflating.
+    if full_sync {
+        match prune_dead_rows(pool, folder_name, account_email, &uids).await {
+            Ok(n) if n > 0 => info!("Pruned {} dead cache row(s) from folder {}", n, folder_name),
+            Ok(_) => {}
+            Err(e) => warn!("Failed to prune dead rows for {}: {}", folder_name, e),
+        }
+    }
+
     info!("Synced {} emails in folder {}", uids.len(), folder_name);
     Ok(())
+}
+
+/// Remove cache rows for messages no longer present in the live folder.
+///
+/// MUST only be called after a FULL sync, where `live_uids` is the complete set
+/// of UIDs currently in the folder (search "ALL"). The set difference
+/// (cached − live) is the dead rows left behind by server-side moves/deletes,
+/// which otherwise inflate get_folder_stats and counts. Deletes are chunked to
+/// stay well under SQLite's bound-parameter limit.
+async fn prune_dead_rows(
+    pool: &SqlitePool,
+    folder_name: &str,
+    account_email: &str,
+    live_uids: &[u32],
+) -> Result<usize, sqlx::Error> {
+    let folder_id = get_or_create_folder_id(pool, folder_name, account_email).await?;
+
+    let cached: Vec<u32> = sqlx::query_scalar::<_, i64>(
+        "SELECT uid FROM emails WHERE folder_id = ?"
+    )
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|u| u as u32)
+    .collect();
+
+    let live: std::collections::HashSet<u32> = live_uids.iter().copied().collect();
+    let dead: Vec<u32> = cached.into_iter().filter(|u| !live.contains(u)).collect();
+
+    if dead.is_empty() {
+        return Ok(0);
+    }
+
+    for chunk in dead.chunks(500) {
+        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM emails WHERE folder_id = ? AND uid IN ({})",
+            placeholders
+        );
+        let mut q = sqlx::query(&sql).bind(folder_id);
+        for uid in chunk {
+            q = q.bind(*uid as i64);
+        }
+        q.execute(pool).await?;
+    }
+
+    Ok(dead.len())
 }
 
 

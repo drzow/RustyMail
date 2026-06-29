@@ -994,6 +994,60 @@ impl CacheService {
         Ok(())
     }
 
+    /// Remove cache rows for messages no longer present in the live folder.
+    ///
+    /// MUST only be called after a FULL sync, where `live_uids` is the complete
+    /// set of UIDs currently in the folder. The set difference (cached − live)
+    /// is the dead rows left behind by server-side moves/deletes, which would
+    /// otherwise inflate counts and get_folder_stats. Deletes are chunked to
+    /// stay under SQLite's bound-parameter limit. Returns the number removed.
+    pub async fn prune_dead_rows(&self, folder_name: &str, account_id: &str, live_uids: &[u32]) -> Result<usize, CacheError> {
+        let folder = match self.get_folder_from_cache_for_account(folder_name, account_id).await {
+            Some(f) => f,
+            None => return Ok(0),
+        };
+        let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
+
+        let cached: Vec<u32> = sqlx::query_scalar::<_, i64>(
+            "SELECT uid FROM emails WHERE folder_id = ?"
+        )
+        .bind(folder.id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|u| u as u32)
+        .collect();
+
+        let live: std::collections::HashSet<u32> = live_uids.iter().copied().collect();
+        let dead: Vec<u32> = cached.into_iter().filter(|u| !live.contains(u)).collect();
+
+        if dead.is_empty() {
+            return Ok(0);
+        }
+
+        for chunk in dead.chunks(500) {
+            let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
+            let sql = format!("DELETE FROM emails WHERE folder_id = ? AND uid IN ({})", placeholders);
+            let mut q = sqlx::query(&sql).bind(folder.id);
+            for uid in chunk {
+                q = q.bind(*uid as i64);
+            }
+            q.execute(pool).await?;
+        }
+
+        // Drop pruned entries from the in-memory cache too.
+        {
+            let mut memory_cache = self.memory_cache.write().await;
+            for uid in &dead {
+                let cache_key = format!("{}:{}:{}", account_id, folder_name, uid);
+                memory_cache.pop(&cache_key);
+            }
+        }
+
+        info!("Pruned {} dead cache row(s) from folder {} for account {}", dead.len(), folder_name, account_id);
+        Ok(dead.len())
+    }
+
     pub async fn get_cache_stats(&self) -> Result<HashMap<String, serde_json::Value>, CacheError> {
         let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
 

@@ -222,8 +222,21 @@ impl SyncService {
 
         let mut uids = session.search_emails(&search_criteria).await?;
 
+        // A full sync (last_uid_synced == 0) searches ALL, so `uids` is the
+        // COMPLETE live UID set — capture it before the limit logic consumes
+        // `uids` so we can prune dead cache rows afterward. Incremental syncs
+        // only see new UIDs and must not prune.
+        let full_sync = last_uid_synced == 0;
+        let live_uids: Vec<u32> = if full_sync { uids.clone() } else { Vec::new() };
+
         if uids.is_empty() {
             debug!("No new emails to sync in folder {}", folder_name);
+            // On a full sync, an empty live folder means every cached row is dead.
+            if full_sync {
+                if let Err(e) = self.cache_service.prune_dead_rows(folder_name, account_email, &live_uids).await {
+                    warn!("Failed to prune dead rows for {}: {}", folder_name, e);
+                }
+            }
             if let Err(e) = self.cache_service.update_sync_state(folder_name, last_uid_synced, SyncStatus::Idle, account_email).await {
                 warn!("Failed to update sync state: {}", e);
             }
@@ -307,6 +320,14 @@ impl SyncService {
 
         if let Err(e) = self.cache_service.update_sync_state(folder_name, last_uid, SyncStatus::Idle, account_email).await {
             warn!("Failed to update sync state: {}", e);
+        }
+
+        // After a full sync, drop cache rows for messages that have left the
+        // folder (moved/deleted server-side) so counts and stats stay accurate.
+        if full_sync {
+            if let Err(e) = self.cache_service.prune_dead_rows(folder_name, account_email, &live_uids).await {
+                warn!("Failed to prune dead rows for {}: {}", folder_name, e);
+            }
         }
 
         if let Err(e) = session.logout().await {
@@ -371,8 +392,21 @@ impl SyncService {
 
         let mut uids = session.search_emails(&search_criteria).await?;
 
+        // A full sync (last_uid_synced == 0) searches ALL, so `uids` is the
+        // COMPLETE live UID set — capture it before the limit logic consumes
+        // `uids` so we can prune dead cache rows afterward. Incremental syncs
+        // only see new UIDs and must not prune.
+        let full_sync = last_uid_synced == 0;
+        let live_uids: Vec<u32> = if full_sync { uids.clone() } else { Vec::new() };
+
         if uids.is_empty() {
             debug!("No new emails to sync in folder {}", folder_name);
+            // On a full sync, an empty live folder means every cached row is dead.
+            if full_sync {
+                if let Err(e) = self.cache_service.prune_dead_rows(folder_name, account_email, &live_uids).await {
+                    warn!("Failed to prune dead rows for {}: {}", folder_name, e);
+                }
+            }
             if let Err(e) = self.cache_service.update_sync_state(folder_name, last_uid_synced, SyncStatus::Idle, account_email).await {
                 warn!("Failed to update sync state: {}", e);
             }
@@ -456,6 +490,14 @@ impl SyncService {
 
         if let Err(e) = self.cache_service.update_sync_state(folder_name, last_uid, SyncStatus::Idle, account_email).await {
             warn!("Failed to update sync state: {}", e);
+        }
+
+        // After a full sync, drop cache rows for messages that have left the
+        // folder (moved/deleted server-side) so counts and stats stay accurate.
+        if full_sync {
+            if let Err(e) = self.cache_service.prune_dead_rows(folder_name, account_email, &live_uids).await {
+                warn!("Failed to prune dead rows for {}: {}", folder_name, e);
+            }
         }
 
         info!("Successfully synced {} emails in folder {}", uids_to_sync.len(), folder_name);

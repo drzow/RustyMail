@@ -664,3 +664,58 @@ async fn test_search_by_domain_is_folder_scoped() {
 
     cleanup_test_db(test_name);
 }
+
+// Regression test for the get_folder_stats inflation bug: a full sync must drop
+// cache rows for messages that have left the folder, so counts reflect the live
+// mailbox instead of accumulating dead rows.
+#[tokio::test]
+#[serial]
+async fn test_prune_dead_rows() {
+    let test_name = "prune_dead_rows";
+    cleanup_test_db(test_name);
+
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    // Cache 5 messages (uids 1..=5).
+    for uid in 1..=5u32 {
+        let email = create_test_email(uid, &format!("Message {}", uid), "sender@example.com");
+        service.cache_email("INBOX", &email, account_id).await.unwrap();
+    }
+    assert_eq!(
+        service.count_emails_in_folder_for_account("INBOX", account_id).await.unwrap(),
+        5,
+        "All 5 should be cached before pruning"
+    );
+
+    // Live folder now only contains uids 1, 3, 5 (2 and 4 were moved/deleted).
+    let live_uids = vec![1u32, 3, 5];
+    let removed = service.prune_dead_rows("INBOX", account_id, &live_uids).await.unwrap();
+    assert_eq!(removed, 2, "Should prune exactly the 2 dead rows (uids 2 and 4)");
+
+    // Count and stats must now reflect the live set, not the inflated 5.
+    assert_eq!(
+        service.count_emails_in_folder_for_account("INBOX", account_id).await.unwrap(),
+        3,
+        "Count must drop to the live total after pruning"
+    );
+    let stats = service.get_folder_stats_for_account("INBOX", account_id).await.unwrap();
+    assert_eq!(stats.get("total").and_then(|v| v.as_i64()), Some(3), "get_folder_stats total must be 3");
+
+    // The survivors are exactly the live uids.
+    let mut survivors: Vec<u32> = service
+        .search_by_domain("example.com", &["from"], account_id, Some("INBOX"), 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(e, _folder)| e.uid)
+        .collect();
+    survivors.sort();
+    assert_eq!(survivors, vec![1, 3, 5], "Only live uids should remain");
+
+    // Pruning again with the same live set is a no-op.
+    let removed_again = service.prune_dead_rows("INBOX", account_id, &live_uids).await.unwrap();
+    assert_eq!(removed_again, 0, "Second prune with same live set removes nothing");
+
+    cleanup_test_db(test_name);
+}
