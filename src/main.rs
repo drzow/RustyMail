@@ -231,6 +231,10 @@ async fn main() -> std::io::Result<()> {
     start_sync_process_spawner();
     info!("Sync process spawner started");
 
+    // Start the hourly dirty-folder reconcile spawner (prune + flag refresh).
+    start_dirty_sync_spawner();
+    info!("Dirty-folder reconcile spawner started");
+
     // Start outbox worker for asynchronous email sending
     let outbox_worker = Arc::new(rustymail::dashboard::services::OutboxWorker::new(
         Arc::clone(&dashboard_state.outbox_queue_service),
@@ -396,6 +400,36 @@ fn start_sync_process_spawner() {
             // Spawn a pure incremental sync (no flags) via the shared helper.
             if let Err(e) = rustymail::dashboard::services::sync_spawner::spawn_sync(&[]) {
                 error!("Failed to spawn sync process: {}", e);
+            }
+        }
+    });
+}
+
+/// Start a background task that reconciles dirty folders on a slow cadence.
+/// Each tick spawns `rustymail-sync --reconcile-dirty`, which prunes dead cache
+/// rows and refreshes flags for folders marked dirty by MCP mutations. The
+/// binary's lock file serializes it against the 5-minute and manual syncs, so a
+/// collision just yields an already_running exit and the dirty flag persists for
+/// the next tick.
+fn start_dirty_sync_spawner() {
+    use std::time::Duration;
+
+    let dirty_sync_interval: u64 = std::env::var("DIRTY_SYNC_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600); // Default: 1 hour
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(dirty_sync_interval));
+        interval.tick().await; // Skip first immediate tick
+
+        loop {
+            interval.tick().await;
+
+            if let Err(e) = rustymail::dashboard::services::sync_spawner::spawn_sync(
+                &["--reconcile-dirty".to_string()],
+            ) {
+                error!("Failed to spawn dirty-reconcile sync process: {}", e);
             }
         }
     });
