@@ -104,3 +104,9 @@ test_data/*_accounts_connection_status.json
 # Sync process lock file (runtime state)
 data/.sync.lock
 data/forensic_archives/*
+
+# DHAT heap profiling output (generated at runtime, do not track)
+/dhat-heap.json
+
+# Claude session-memory plugin state
+/.remember/
