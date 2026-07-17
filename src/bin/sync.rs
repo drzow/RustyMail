@@ -50,6 +50,15 @@ struct Cli {
     /// Force re-sync all emails (ignore last synced UID, re-download everything)
     #[arg(long)]
     force: bool,
+
+    /// After the incremental sync, reconcile dirty target folders for the account
+    /// (prune dead cache rows + refresh flags). Requires --account.
+    #[arg(long)]
+    reconcile: bool,
+
+    /// Reconcile every dirty folder across all accounts, then exit. Takes no --account.
+    #[arg(long)]
+    reconcile_dirty: bool,
 }
 
 /// Account row from database
@@ -143,6 +152,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Validate args: --reconcile requires --account (mirror --folder rule).
+    // --reconcile-dirty is account-agnostic and takes neither.
+    if cli.reconcile && cli.account.is_none() {
+        error!("--reconcile requires --account to be specified");
+        std::process::exit(1);
+    }
+
     let mode_desc = match (&cli.account, &cli.folder) {
         (Some(acc), Some(folder)) => format!("account {} folder {}", acc, folder),
         (Some(acc), None) => format!("account {}", acc),
@@ -177,6 +193,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to database
     let pool = SqlitePool::connect(&cli.database_url).await?;
     info!("Connected to database: {}", cli.database_url);
+
+    // --reconcile-dirty: reconcile every dirty folder across all accounts, then exit.
+    if cli.reconcile_dirty {
+        let result = reconcile_dirty_folders(&pool).await;
+        info!("Reconcile-dirty complete, exiting");
+        return result;
+    }
 
     // Build query based on whether we're filtering by account
     let rows = if let Some(ref account_filter) = cli.account {
@@ -228,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sync each account (or single account if filtered)
     for account in accounts {
-        if let Err(e) = sync_account(&pool, &account, cli.folder.as_deref(), cli.force).await {
+        if let Err(e) = sync_account(&pool, &account, cli.folder.as_deref(), cli.force, cli.reconcile).await {
             error!("Failed to sync {}: {}", account.email_address, e);
         }
     }
@@ -237,16 +260,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Sync folders for a single account
-/// If folder_filter is Some, only sync that specific folder
-async fn sync_account(pool: &SqlitePool, account: &AccountRow, folder_filter: Option<&str>, force: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let mode = match folder_filter {
-        Some(f) => format!("folder {}", f),
-        None => "all folders".to_string(),
-    };
-    info!("Syncing account: {} ({})", account.email_address, mode);
-
-    // Create IMAP session (XOAUTH2 for OAuth accounts, password for others)
+/// Create an IMAP session for an account (XOAUTH2 for OAuth accounts, password
+/// otherwise). Extracted so both sync_account and the reconcile-dirty path
+/// connect the same way (one definition).
+async fn connect_account_session(
+    account: &AccountRow,
+) -> Result<rustymail::imap::client::ImapClient<rustymail::imap::session::AsyncImapSessionWrapper>, Box<dyn std::error::Error>> {
     let client = if account.oauth_provider.is_some() {
         let token = account.oauth_access_token.as_deref()
             .ok_or("OAuth account has no access token — complete OAuth flow first")?;
@@ -267,6 +286,60 @@ async fn sync_account(pool: &SqlitePool, account: &AccountRow, folder_filter: Op
     };
 
     info!("Connected to IMAP server {} for {}", account.imap_host, account.email_address);
+    Ok(client)
+}
+
+/// Look up an active account row by email address.
+async fn fetch_account_row(pool: &SqlitePool, email: &str) -> Result<Option<AccountRow>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT email_address, imap_host, imap_port, imap_user, imap_pass, imap_use_tls,
+               oauth_provider, oauth_access_token
+        FROM accounts WHERE is_active = 1 AND email_address = ?
+        "#
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| AccountRow {
+        email_address: row.get("email_address"),
+        imap_host: row.get("imap_host"),
+        imap_port: row.get("imap_port"),
+        imap_user: row.get("imap_user"),
+        imap_pass: row.get("imap_pass"),
+        imap_use_tls: row.get("imap_use_tls"),
+        oauth_provider: row.get("oauth_provider"),
+        oauth_access_token: row.get("oauth_access_token"),
+    }))
+}
+
+/// True if the folder's sync_state row is marked dirty.
+async fn is_folder_dirty(pool: &SqlitePool, folder_name: &str, account_email: &str) -> Result<bool, sqlx::Error> {
+    let dirty: Option<i64> = sqlx::query_scalar(
+        "SELECT s.dirty FROM sync_state s
+         JOIN folders f ON f.id = s.folder_id
+         WHERE f.name = ? AND f.account_id = ?"
+    )
+    .bind(folder_name)
+    .bind(account_email)
+    .fetch_optional(pool)
+    .await?;
+    Ok(dirty.unwrap_or(0) == 1)
+}
+
+/// Sync folders for a single account
+/// If folder_filter is Some, only sync that specific folder.
+/// When `reconcile` is true, each synced folder whose dirty flag is set is
+/// reconciled (prune dead rows + refresh flags) on the same open session.
+async fn sync_account(pool: &SqlitePool, account: &AccountRow, folder_filter: Option<&str>, force: bool, reconcile: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mode = match folder_filter {
+        Some(f) => format!("folder {}", f),
+        None => "all folders".to_string(),
+    };
+    info!("Syncing account: {} ({})", account.email_address, mode);
+
+    let client = connect_account_session(account).await?;
 
     // Determine which folders to sync
     let folders_to_sync: Vec<String> = if let Some(folder) = folder_filter {
@@ -287,12 +360,86 @@ async fn sync_account(pool: &SqlitePool, account: &AccountRow, folder_filter: Op
         }
     }
 
+    // After the incremental pass, reconcile the dirty target folders on the same
+    // session (spec §4 --reconcile), so "mutate then sync" leaves the cache clean.
+    if reconcile {
+        for folder in &folders_to_sync {
+            match is_folder_dirty(pool, folder, &account.email_address).await {
+                Ok(true) => {
+                    if let Err(e) = rustymail::sync_reconcile::reconcile_folder(pool, &client, &account.email_address, folder).await {
+                        warn!("Reconcile failed for {}/{}: {}", account.email_address, folder, e);
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => warn!("Failed to read dirty flag for {}/{}: {}", account.email_address, folder, e),
+            }
+        }
+    }
+
     // IMPORTANT: Logout to release BytePool buffers
     if let Err(e) = client.logout().await {
         warn!("Failed to logout IMAP session: {}", e);
     }
 
     info!("Finished syncing account: {}", account.email_address);
+    Ok(())
+}
+
+/// Reconcile every dirty folder across all accounts (--reconcile-dirty).
+/// Groups dirty folders by account, connects once per account, and for each
+/// dirty folder runs an incremental new-UID sync then a reconcile. A per-folder
+/// or per-account failure is logged and skipped; the dirty flag survives so the
+/// next tick retries (spec §7).
+async fn reconcile_dirty_folders(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+    let dirty = rustymail::sync_reconcile::list_dirty_folders(pool).await?;
+    if dirty.is_empty() {
+        info!("No dirty folders to reconcile");
+        return Ok(());
+    }
+
+    // Group folders by account email.
+    let mut by_account: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (email, folder) in dirty {
+        by_account.entry(email).or_default().push(folder);
+    }
+    info!("Reconciling dirty folders for {} account(s)", by_account.len());
+
+    for (email, folders) in by_account {
+        let account = match fetch_account_row(pool, &email).await {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                warn!("Dirty folders for unknown/inactive account {}, skipping", email);
+                continue;
+            }
+            Err(e) => {
+                error!("Failed to look up account {}: {}", email, e);
+                continue;
+            }
+        };
+
+        let client = match connect_account_session(&account).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to connect for {}: {}", email, e);
+                continue;
+            }
+        };
+
+        for folder in &folders {
+            // Incremental new-UID fetch first (spec §4), then reconcile.
+            if let Err(e) = sync_folder(pool, &client, &email, folder, false).await {
+                warn!("Incremental sync failed for {}/{}: {}", email, folder, e);
+            }
+            if let Err(e) = rustymail::sync_reconcile::reconcile_folder(pool, &client, &email, folder).await {
+                warn!("Reconcile failed for {}/{}: {}", email, folder, e);
+            }
+        }
+
+        if let Err(e) = client.logout().await {
+            warn!("Failed to logout IMAP session for {}: {}", email, e);
+        }
+    }
+
     Ok(())
 }
 
