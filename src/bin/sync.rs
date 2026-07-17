@@ -345,7 +345,7 @@ async fn sync_folder(
         debug!("No new emails in folder {}", folder_name);
         // On a full sync, an empty live folder means every cached row is dead.
         if full_sync {
-            match prune_dead_rows(pool, folder_name, account_email, &uids).await {
+            match rustymail::sync_reconcile::prune_dead_rows(pool, folder_name, account_email, &uids).await {
                 Ok(n) if n > 0 => info!("Pruned {} dead cache row(s) from now-empty folder {}", n, folder_name),
                 Ok(_) => {}
                 Err(e) => warn!("Failed to prune dead rows for {}: {}", folder_name, e),
@@ -399,7 +399,7 @@ async fn sync_folder(
     // folder (moved or deleted server-side). Remove those dead rows so counts
     // and get_folder_stats reflect the live mailbox instead of inflating.
     if full_sync {
-        match prune_dead_rows(pool, folder_name, account_email, &uids).await {
+        match rustymail::sync_reconcile::prune_dead_rows(pool, folder_name, account_email, &uids).await {
             Ok(n) if n > 0 => info!("Pruned {} dead cache row(s) from folder {}", n, folder_name),
             Ok(_) => {}
             Err(e) => warn!("Failed to prune dead rows for {}: {}", folder_name, e),
@@ -409,55 +409,6 @@ async fn sync_folder(
     info!("Synced {} emails in folder {}", uids.len(), folder_name);
     Ok(())
 }
-
-/// Remove cache rows for messages no longer present in the live folder.
-///
-/// MUST only be called after a FULL sync, where `live_uids` is the complete set
-/// of UIDs currently in the folder (search "ALL"). The set difference
-/// (cached − live) is the dead rows left behind by server-side moves/deletes,
-/// which otherwise inflate get_folder_stats and counts. Deletes are chunked to
-/// stay well under SQLite's bound-parameter limit.
-async fn prune_dead_rows(
-    pool: &SqlitePool,
-    folder_name: &str,
-    account_email: &str,
-    live_uids: &[u32],
-) -> Result<usize, sqlx::Error> {
-    let folder_id = get_or_create_folder_id(pool, folder_name, account_email).await?;
-
-    let cached: Vec<u32> = sqlx::query_scalar::<_, i64>(
-        "SELECT uid FROM emails WHERE folder_id = ?"
-    )
-    .bind(folder_id)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|u| u as u32)
-    .collect();
-
-    let live: std::collections::HashSet<u32> = live_uids.iter().copied().collect();
-    let dead: Vec<u32> = cached.into_iter().filter(|u| !live.contains(u)).collect();
-
-    if dead.is_empty() {
-        return Ok(0);
-    }
-
-    for chunk in dead.chunks(500) {
-        let placeholders = std::iter::repeat("?").take(chunk.len()).collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "DELETE FROM emails WHERE folder_id = ? AND uid IN ({})",
-            placeholders
-        );
-        let mut q = sqlx::query(&sql).bind(folder_id);
-        for uid in chunk {
-            q = q.bind(*uid as i64);
-        }
-        q.execute(pool).await?;
-    }
-
-    Ok(dead.len())
-}
-
 
 /// Detect UIDVALIDITY change (RFC 3501 §2.3.1.1) and flush stale cache.
 /// When UIDVALIDITY changes, all previously-cached UIDs are invalid.
@@ -555,7 +506,7 @@ async fn get_last_uid(pool: &SqlitePool, folder_name: &str, account_id: &str) ->
 
 /// Update sync progress (called during batch processing)
 async fn update_sync_progress(pool: &SqlitePool, folder_name: &str, account_id: &str, emails_synced: i64, emails_total: i64) -> Result<(), sqlx::Error> {
-    let folder_id = get_or_create_folder_id(pool, folder_name, account_id).await?;
+    let folder_id = rustymail::sync_reconcile::get_or_create_folder_id(pool, folder_name, account_id).await?;
 
     sqlx::query(
         r#"
@@ -583,7 +534,7 @@ async fn update_folder_metadata(
     account_id: &str,
     mailbox_info: &rustymail::imap::types::MailboxInfo,
 ) -> Result<(), sqlx::Error> {
-    let folder_id = get_or_create_folder_id(pool, folder_name, account_id).await?;
+    let folder_id = rustymail::sync_reconcile::get_or_create_folder_id(pool, folder_name, account_id).await?;
 
     sqlx::query(
         r#"
@@ -614,7 +565,7 @@ async fn update_folder_metadata(
 /// Update sync state with new last UID (resets progress to 0)
 async fn update_sync_state(pool: &SqlitePool, folder_name: &str, last_uid: u32, account_id: &str) -> Result<(), sqlx::Error> {
     // Get folder_id first
-    let folder_id = get_or_create_folder_id(pool, folder_name, account_id).await?;
+    let folder_id = rustymail::sync_reconcile::get_or_create_folder_id(pool, folder_name, account_id).await?;
 
     sqlx::query(
         r#"
@@ -645,7 +596,7 @@ async fn cache_email(
     account_id: &str,
 ) -> Result<(), sqlx::Error> {
     // Get or create folder_id first
-    let folder_id = get_or_create_folder_id(pool, folder_name, account_id).await?;
+    let folder_id = rustymail::sync_reconcile::get_or_create_folder_id(pool, folder_name, account_id).await?;
 
     // Extract data from envelope (matches cache.rs logic)
     let (message_id, subject, from_str, from_name_str, to_vec, cc_vec, parsed_date) =
@@ -753,38 +704,7 @@ async fn cache_email(
     Ok(())
 }
 
-/// Get or create a folder_id for the given folder_name and account_id
-async fn get_or_create_folder_id(pool: &SqlitePool, folder_name: &str, account_id: &str) -> Result<i64, sqlx::Error> {
-    // First try to get existing folder
-    let existing: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM folders WHERE name = ? AND account_id = ?"
-    )
-    .bind(folder_name)
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-
-    // Create the folder
-    sqlx::query(
-        "INSERT INTO folders (name, account_id, created_at) VALUES (?, ?, datetime('now'))"
-    )
-    .bind(folder_name)
-    .bind(account_id)
-    .execute(pool)
-    .await?;
-
-    // Get the new ID
-    let id: i64 = sqlx::query_scalar(
-        "SELECT id FROM folders WHERE name = ? AND account_id = ?"
-    )
-    .bind(folder_name)
-    .bind(account_id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(id)
-}
+// get_or_create_folder_id and prune_dead_rows moved to
+// rustymail::sync_reconcile so both this binary and the reconcile logic share
+// one definition. Call them via the crate-name path (this is a separate binary
+// crate — same pattern as rustymail::forensic).

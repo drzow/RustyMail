@@ -23,6 +23,7 @@ pub mod session_manager;
 pub mod connection_pool;
 pub mod utils;
 pub mod forensic;
+pub mod sync_reconcile;
 pub mod evidence_export;
 pub mod metadata_export;
 pub mod filter_emails;
