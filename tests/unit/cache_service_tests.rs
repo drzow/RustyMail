@@ -719,3 +719,37 @@ async fn test_prune_dead_rows() {
 
     cleanup_test_db(test_name);
 }
+
+// ---------------------------------------------------------------------------
+// Step 1 (migration 015): sync_state.dirty column exists and defaults to 0
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[serial]
+async fn migration_015_adds_dirty_column() {
+    let test_name = "migration_015_dirty";
+    cleanup_test_db(test_name);
+
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    // Create a sync_state row (INSERT does not set dirty, so it must default to 0).
+    service
+        .update_sync_state("INBOX", 42, SyncStatus::Idle, account_id)
+        .await
+        .unwrap();
+
+    let pool = service.db_pool.as_ref().unwrap();
+    let dirty: i64 = sqlx::query_scalar(
+        "SELECT dirty FROM sync_state s
+         JOIN folders f ON f.id = s.folder_id
+         WHERE f.name = 'INBOX' AND f.account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await
+    .expect("SELECT dirty FROM sync_state must succeed (column exists)");
+
+    assert_eq!(dirty, 0, "dirty column must default to 0");
+
+    cleanup_test_db(test_name);
+}
