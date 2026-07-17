@@ -354,20 +354,36 @@ async fn test_mcp_tools_list() {
         "get_email_by_uid", "get_email_by_index", "get_folder_stats",
         "count_emails_in_folder", "list_cached_emails",
     ];
+    let mut seen_mutating = 0;
+    let mut seen_read = 0;
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         let description = tool["description"].as_str().unwrap();
         if mutating_tools.contains(&name) {
+            seen_mutating += 1;
             assert!(description.contains("Cache-backed reads"),
                     "Mutating tool '{}' description must carry the cache-lag note", name);
             assert!(description.contains("retry it until it returns status"),
                     "Mutating tool '{}' description must give the retry-then-poll path", name);
+            // The note is appended via format!("{} {}", ...) and the const has
+            // no leading space, so the join must not produce a double space.
+            assert!(!description.contains("  "),
+                    "Mutating tool '{}' description has a double-space artifact", name);
         }
         if cache_read_tools.contains(&name) {
+            seen_read += 1;
             assert!(description.contains("Reads the local cache"),
                     "Read tool '{}' description must flag it as cache-backed", name);
+            // CACHE_READ_NOTE carries its own leading space and is joined with
+            // format!("{}{}", ...); guard against an accidental double space.
+            assert!(!description.contains("  "),
+                    "Read tool '{}' description has a double-space artifact", name);
         }
     }
+    assert_eq!(seen_mutating, mutating_tools.len(),
+               "All {} mutating tools must be present in tools/list", mutating_tools.len());
+    assert_eq!(seen_read, cache_read_tools.len(),
+               "All {} cache-backed read tools must be present in tools/list", cache_read_tools.len());
 
     println!("✓ tools/list returns array of {} available tools", tools.len());
     println!("✓ Each tool has name, description, and inputSchema");
@@ -867,6 +883,87 @@ async fn test_mcp_dashboard_api_consistency() {
     println!("✓ All tool names match exactly between interfaces");
     println!("✓ All parameter names match for each tool");
     println!("✓ Architecture requirement satisfied: same tools, same parameters everywhere");
+
+    cleanup_test_db(test_name);
+}
+
+/// Cache-lag UX surface, SECOND registration block (diagnosis 2026-07-17,
+/// Fixes (b) and (c)). `test_mcp_tools_list` only exercises the `tools/list`
+/// JSON-RPC block (`get_mcp_tools_jsonrpc_format`). The note edits were also
+/// applied to `list_mcp_tools`, served at `/api/dashboard/mcp/tools`; this test
+/// pins the same per-tool wording there so the two blocks cannot drift.
+#[tokio::test]
+#[serial]
+async fn test_mcp_dashboard_tools_carry_cache_notes() {
+    setup_test_env();
+    let test_name = "dashboard_cache_notes";
+    println!("=== Testing Dashboard /mcp/tools cache-lag note surface ===");
+
+    let dashboard_state = create_test_dashboard_state(test_name).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(dashboard_state.clone())
+            .service(rustymail::dashboard::api::routes::configure_routes())
+    ).await;
+
+    let dashboard_req = test::TestRequest::get()
+        .uri("/api/dashboard/mcp/tools")
+        .insert_header(("X-API-Key", "test-rustymail-key-2024"))
+        .to_request();
+
+    let dashboard_resp = test::call_service(&app, dashboard_req).await;
+    assert!(dashboard_resp.status().is_success(),
+            "Dashboard /mcp/tools should succeed (status: {:?})", dashboard_resp.status());
+    let dashboard_body: serde_json::Value = test::read_body_json(dashboard_resp).await;
+    let tools = dashboard_body["tools"].as_array().unwrap();
+
+    // Same 8 mutating + 5 cache-backed read tools as test_mcp_tools_list, but
+    // asserted against the list_mcp_tools block.
+    let mutating_tools = vec![
+        "atomic_move_message", "atomic_batch_move",
+        "mark_as_read", "mark_as_unread", "mark_as_deleted",
+        "delete_messages", "undelete_messages", "expunge",
+    ];
+    let cache_read_tools = vec![
+        "get_email_by_uid", "get_email_by_index", "get_folder_stats",
+        "count_emails_in_folder", "list_cached_emails",
+    ];
+
+    // Track that every expected tool was actually present and checked, so a
+    // dropped tool cannot silently pass by never matching the membership test.
+    let mut seen_mutating = 0;
+    let mut seen_read = 0;
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let description = tool["description"].as_str().unwrap();
+        if mutating_tools.contains(&name) {
+            seen_mutating += 1;
+            assert!(description.contains("Cache-backed reads"),
+                    "Mutating tool '{}' description must carry the cache-lag note", name);
+            assert!(description.contains("retry it until it returns status"),
+                    "Mutating tool '{}' description must give the retry-then-poll path", name);
+            // Guard against a double-space artifact between the original
+            // description and the appended note (format!("{} {}", ...)).
+            assert!(!description.contains("  "),
+                    "Mutating tool '{}' description has a double-space artifact", name);
+        }
+        if cache_read_tools.contains(&name) {
+            seen_read += 1;
+            assert!(description.contains("Reads the local cache"),
+                    "Read tool '{}' description must flag it as cache-backed", name);
+            assert!(!description.contains("  "),
+                    "Read tool '{}' description has a double-space artifact", name);
+        }
+    }
+
+    assert_eq!(seen_mutating, mutating_tools.len(),
+               "All {} mutating tools must be present in the dashboard block", mutating_tools.len());
+    assert_eq!(seen_read, cache_read_tools.len(),
+               "All {} cache-backed read tools must be present in the dashboard block", cache_read_tools.len());
+
+    println!("✓ Dashboard block: {} mutating tools carry the cache-lag note", seen_mutating);
+    println!("✓ Dashboard block: {} read tools flagged cache-backed", seen_read);
 
     cleanup_test_db(test_name);
 }
