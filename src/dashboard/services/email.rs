@@ -420,6 +420,24 @@ impl EmailService {
         }
     }
 
+    /// Best-effort: mark a folder dirty on the default account's cache.
+    /// Silent no-op when cache/account service is absent; logs a warning on DB error
+    /// (the IMAP mutation already succeeded — never fail it for a cache-write miss).
+    /// Attributes the flag to the default account because the mutators open their
+    /// IMAP session via create_session(), which uses the default .env credentials.
+    async fn mark_folder_dirty(&self, folder: &str) {
+        let (Some(cache), Some(accts)) = (self.cache_service.as_ref(), self.account_service.as_ref())
+            else { return; };
+        let account_email = match accts.lock().await.get_default_account().await {
+            Ok(Some(a)) => a.email_address,
+            Ok(None) => { warn!("mark_folder_dirty: no default account; skipping {}", folder); return; }
+            Err(e) => { warn!("mark_folder_dirty: default account lookup failed: {}", e); return; }
+        };
+        if let Err(e) = cache.mark_folder_dirty(folder, &account_email).await {
+            warn!("Failed to mark folder '{}' dirty: {}", folder, e);
+        }
+    }
+
     /// Atomically move a single email from one folder to another
     pub async fn atomic_move_message(&self, uid: u32, from_folder: &str, to_folder: &str) -> Result<(), EmailServiceError> {
         debug!("Atomically moving email {} from {} to {}", uid, from_folder, to_folder);
@@ -439,6 +457,8 @@ impl EmailService {
 
         // Note: Cache will be invalidated naturally on next access
         info!("Successfully moved email {} from {} to {}", uid, from_folder, to_folder);
+        self.mark_folder_dirty(from_folder).await;
+        self.mark_folder_dirty(to_folder).await;
         Ok(())
     }
 
@@ -461,6 +481,8 @@ impl EmailService {
 
         // Note: Cache will be invalidated naturally on next access
         info!("Successfully moved {} emails from {} to {}", uids.len(), from_folder, to_folder);
+        self.mark_folder_dirty(from_folder).await;
+        self.mark_folder_dirty(to_folder).await;
         Ok(())
     }
 
@@ -483,6 +505,7 @@ impl EmailService {
 
         // Note: Cache will be invalidated naturally on next access
         info!("Successfully marked {} emails as read", uids.len());
+        self.mark_folder_dirty(folder).await;
         Ok(())
     }
 
@@ -505,6 +528,7 @@ impl EmailService {
 
         // Note: Cache will be invalidated naturally on next access
         info!("Successfully marked {} emails as unread", uids.len());
+        self.mark_folder_dirty(folder).await;
         Ok(())
     }
 
@@ -525,6 +549,7 @@ impl EmailService {
 
         // Note: Cache will be invalidated naturally on next access
         info!("Successfully marked {} emails as deleted", uids.len());
+        self.mark_folder_dirty(folder).await;
         Ok(())
     }
 
@@ -601,6 +626,12 @@ impl EmailService {
         }
 
         info!("Successfully deleted {} messages with attachments for account {}", uids.len(), account_id);
+        // Mark dirty against the explicit account this method already loaded (no default lookup).
+        if let Some(cache) = self.cache_service.as_ref() {
+            if let Err(e) = cache.mark_folder_dirty(folder, &account.email_address).await {
+                warn!("Failed to mark folder '{}' dirty: {}", folder, e);
+            }
+        }
         Ok(())
     }
 
@@ -620,6 +651,7 @@ impl EmailService {
         }
 
         info!("Successfully undeleted {} messages", uids.len());
+        self.mark_folder_dirty(folder).await;
         Ok(())
     }
 
@@ -639,6 +671,7 @@ impl EmailService {
         }
 
         info!("Successfully expunged messages from {}", folder);
+        self.mark_folder_dirty(folder).await;
         Ok(())
     }
 
@@ -810,5 +843,41 @@ impl EmailService {
 
         info!("Fetched email {} with {} attachments for account {}", uid, attachment_infos.len(), account_id);
         Ok((email, attachment_infos))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection_pool::{ConnectionFactory, ConnectionPool, PoolConfig};
+    use crate::imap::client::ImapClient;
+    use crate::imap::session::AsyncImapSessionWrapper;
+    use async_trait::async_trait;
+
+    struct MockConnectionFactory;
+
+    #[async_trait]
+    impl ConnectionFactory for MockConnectionFactory {
+        async fn create(&self) -> Result<Arc<ImapClient<AsyncImapSessionWrapper>>, ImapError> {
+            Err(ImapError::Connection("mock".to_string()))
+        }
+        async fn validate(&self, _client: &Arc<ImapClient<AsyncImapSessionWrapper>>) -> bool {
+            true
+        }
+    }
+
+    // Step 3: the private best-effort helper must silently no-op (never panic)
+    // when the service was built without a cache service (cache_service = None).
+    #[tokio::test]
+    async fn mark_folder_dirty_noop_without_cache() {
+        let factory: crate::imap::ImapSessionFactory = Box::new(|| {
+            Box::pin(async { Err(ImapError::Connection("mock".to_string())) })
+        });
+        let imap_factory = crate::imap::CloneableImapSessionFactory::new(factory);
+        let pool = ConnectionPool::new(Arc::new(MockConnectionFactory), PoolConfig::default());
+
+        let service = EmailService::new(imap_factory, pool);
+        // cache_service and account_service are both None here — must return early.
+        service.mark_folder_dirty("INBOX").await;
     }
 }
