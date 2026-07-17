@@ -300,7 +300,9 @@ async fn test_mcp_tools_list() {
     assert!(body["result"]["tools"].is_array(), "Result should contain tools array");
 
     let tools = body["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 38, "Should have exactly 38 tools");
+    // 39 low-level tools + 7 sieve tools appended by the tools/list endpoint
+    // (src/api/mcp_http.rs extends with sieve_tool_definitions()).
+    assert_eq!(tools.len(), 46, "Should have exactly 46 tools (39 low-level + 7 sieve)");
 
     // Verify each tool has required fields
     let expected_tool_names = vec![
@@ -314,11 +316,14 @@ async fn test_mcp_tools_list() {
         "mark_as_read", "mark_as_unread",
         "send_email", "list_email_attachments", "download_email_attachments", "cleanup_attachments",
         "create_folder", "delete_folder", "rename_folder",
-        "sync_emails", "search_by_attachment_type", "list_emails_by_flag",
+        "sync_emails", "get_sync_status", "search_by_attachment_type", "list_emails_by_flag",
         "get_email_synopsis", "get_email_thread",
         "search_by_domain", "get_address_report",
         "get_attachment_content", "export_evidence", "export_folder_metadata",
-        "filter_emails_by_subject", "batch_get_synopsis"
+        "filter_emails_by_subject", "batch_get_synopsis",
+        // Sieve tools appended to the tools/list endpoint by the managesieve feature.
+        "sieve_capabilities", "sieve_check_script", "sieve_delete_script",
+        "sieve_get_script", "sieve_list_scripts", "sieve_put_script", "sieve_set_active"
     ];
 
     for tool in tools {
