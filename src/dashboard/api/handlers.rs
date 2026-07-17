@@ -3602,43 +3602,45 @@ pub async fn execute_mcp_tool_inner(
             };
 
             let folder = params.get("folder").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let sync_service = state.sync_service.clone();
 
-            match folder {
-                Some(ref f) => {
-                    info!("MCP sync_emails: syncing folder '{}' for account '{}'", f, account_id);
-                    match sync_service.sync_folder(&account_id, f).await {
-                        Ok(()) => serde_json::json!({
-                            "success": true,
-                            "data": {
-                                "message": format!("Synced folder '{}' for account '{}'", f, account_id),
-                            },
-                            "tool": tool_name
-                        }),
-                        Err(e) => serde_json::json!({
-                            "success": false,
-                            "error": format!("Failed to sync folder '{}': {}", f, e),
-                            "tool": tool_name
-                        })
-                    }
-                }
-                None => {
-                    info!("MCP sync_emails: syncing all folders for account '{}'", account_id);
-                    match sync_service.sync_all_folders(&account_id).await {
-                        Ok(()) => serde_json::json!({
-                            "success": true,
-                            "data": {
-                                "message": format!("Synced all folders for account '{}'", account_id),
-                            },
-                            "tool": tool_name
-                        }),
-                        Err(e) => serde_json::json!({
-                            "success": false,
-                            "error": format!("Failed to sync all folders: {}", e),
-                            "tool": tool_name
-                        })
-                    }
-                }
+            // Spawn rustymail-sync --reconcile in the background so the tool
+            // returns immediately (a full sync can take many minutes, far beyond
+            // the MCP client timeout). The subprocess runs the same engine as the
+            // periodic sync and reclaims its memory on exit.
+            let mut args: Vec<String> = vec![
+                "--account".to_string(), account_id.clone(),
+                "--reconcile".to_string(),
+            ];
+            if let Some(ref f) = folder {
+                args.push("--folder".to_string());
+                args.push(f.clone());
+            }
+            let scope = match folder {
+                Some(ref f) => format!("folder '{}' for account '{}'", f, account_id),
+                None => format!("all folders for account '{}'", account_id),
+            };
+            info!("MCP sync_emails: spawning background sync for {}", scope);
+
+            use crate::dashboard::services::sync_spawner::{spawn_sync, SpawnOutcome};
+            match spawn_sync(&args) {
+                Ok(SpawnOutcome::AlreadyRunning) => serde_json::json!({
+                    "success": true,
+                    "data": { "status": "already_running" },
+                    "tool": tool_name
+                }),
+                Ok(SpawnOutcome::Started { .. }) | Ok(SpawnOutcome::Completed) => serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "status": "started",
+                        "message": format!("Sync started for {}", scope),
+                    },
+                    "tool": tool_name
+                }),
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to start sync: {}", e),
+                    "tool": tool_name
+                })
             }
         }
         "export_folder_metadata" => {
