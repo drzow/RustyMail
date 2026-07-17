@@ -753,3 +753,68 @@ async fn migration_015_adds_dirty_column() {
 
     cleanup_test_db(test_name);
 }
+
+// ---------------------------------------------------------------------------
+// Step 2: mark_folder_dirty / clear_folder_dirty helpers
+// ---------------------------------------------------------------------------
+async fn read_dirty(service: &CacheService, folder: &str, account_id: &str) -> i64 {
+    let pool = service.db_pool.as_ref().unwrap();
+    sqlx::query_scalar(
+        "SELECT dirty FROM sync_state s
+         JOIN folders f ON f.id = s.folder_id
+         WHERE f.name = ? AND f.account_id = ?",
+    )
+    .bind(folder)
+    .bind(account_id)
+    .fetch_one(pool)
+    .await
+    .expect("dirty row should exist")
+}
+
+#[tokio::test]
+#[serial]
+async fn mark_folder_dirty_sets_flag() {
+    let test_name = "mark_dirty_sets";
+    cleanup_test_db(test_name);
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    // Seed a sync_state row first, then mark dirty.
+    service.update_sync_state("INBOX", 10, SyncStatus::Idle, account_id).await.unwrap();
+    service.mark_folder_dirty("INBOX", account_id).await.unwrap();
+
+    assert_eq!(read_dirty(&service, "INBOX", account_id).await, 1, "flag must be set");
+    cleanup_test_db(test_name);
+}
+
+#[tokio::test]
+#[serial]
+async fn mark_folder_dirty_upserts_when_no_sync_state_row() {
+    let test_name = "mark_dirty_upsert";
+    cleanup_test_db(test_name);
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    // No update_sync_state call: the folder gets created but has no sync_state row.
+    // mark_folder_dirty must create the row via upsert (spec §1 explicit case).
+    service.mark_folder_dirty("Archive", account_id).await.unwrap();
+
+    assert_eq!(read_dirty(&service, "Archive", account_id).await, 1, "upsert must create row with dirty=1");
+    cleanup_test_db(test_name);
+}
+
+#[tokio::test]
+#[serial]
+async fn clear_folder_dirty_resets_flag() {
+    let test_name = "clear_dirty_resets";
+    cleanup_test_db(test_name);
+    let account_id = "test@account.com";
+    let service = setup_service_with_account(test_name, account_id).await;
+
+    service.mark_folder_dirty("INBOX", account_id).await.unwrap();
+    assert_eq!(read_dirty(&service, "INBOX", account_id).await, 1);
+
+    service.clear_folder_dirty("INBOX", account_id).await.unwrap();
+    assert_eq!(read_dirty(&service, "INBOX", account_id).await, 0, "clear must reset to 0");
+    cleanup_test_db(test_name);
+}

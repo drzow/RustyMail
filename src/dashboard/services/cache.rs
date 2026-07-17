@@ -894,6 +894,35 @@ impl CacheService {
         Ok(())
     }
 
+    /// Mark a folder dirty (a cache-affecting mutation happened). Upserts because
+    /// a never-synced folder may have no sync_state row yet.
+    pub async fn mark_folder_dirty(&self, folder_name: &str, account_id: &str) -> Result<(), CacheError> {
+        let folder = self.get_or_create_folder_for_account(folder_name, account_id).await?;
+        let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
+        sqlx::query(
+            "INSERT INTO sync_state (folder_id, dirty) VALUES (?, 1)
+             ON CONFLICT(folder_id) DO UPDATE SET dirty = 1, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(folder.id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear a folder's dirty flag (after a successful reconcile).
+    pub async fn clear_folder_dirty(&self, folder_name: &str, account_id: &str) -> Result<(), CacheError> {
+        let folder = self.get_or_create_folder_for_account(folder_name, account_id).await?;
+        let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
+        sqlx::query(
+            "INSERT INTO sync_state (folder_id, dirty) VALUES (?, 0)
+             ON CONFLICT(folder_id) DO UPDATE SET dirty = 0, updated_at = CURRENT_TIMESTAMP"
+        )
+        .bind(folder.id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_sync_state(&self, folder_name: &str, account_id: &str) -> Result<Option<SyncState>, CacheError> {
         let folder = match self.get_folder_from_cache_for_account(folder_name, account_id).await {
             Some(f) => f,
