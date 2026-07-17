@@ -341,9 +341,38 @@ async fn test_mcp_tools_list() {
                 "Tool '{}' should be in expected list", tool_name);
     }
 
+    // Cache-lag UX surface (diagnosis 2026-07-17, Fixes (b) and (c)):
+    // every mutating tool's description must carry the MUTATION_CACHE_NOTE
+    // wording, and every cache-backed read tool's description must carry the
+    // CACHE_READ_NOTE wording, so agents know cache reads lag mutations.
+    let mutating_tools = vec![
+        "atomic_move_message", "atomic_batch_move",
+        "mark_as_read", "mark_as_unread", "mark_as_deleted",
+        "delete_messages", "undelete_messages", "expunge",
+    ];
+    let cache_read_tools = vec![
+        "get_email_by_uid", "get_email_by_index", "get_folder_stats",
+        "count_emails_in_folder", "list_cached_emails",
+    ];
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let description = tool["description"].as_str().unwrap();
+        if mutating_tools.contains(&name) {
+            assert!(description.contains("Cache-backed reads"),
+                    "Mutating tool '{}' description must carry the cache-lag note", name);
+            assert!(description.contains("retry it until it returns status"),
+                    "Mutating tool '{}' description must give the retry-then-poll path", name);
+        }
+        if cache_read_tools.contains(&name) {
+            assert!(description.contains("Reads the local cache"),
+                    "Read tool '{}' description must flag it as cache-backed", name);
+        }
+    }
+
     println!("✓ tools/list returns array of {} available tools", tools.len());
     println!("✓ Each tool has name, description, and inputSchema");
     println!("✓ All expected email operation tools are present");
+    println!("✓ Mutating tools carry the cache-lag note; read tools flagged cache-backed");
     println!("✓ Tool schemas are valid JSON Schema format");
 
     cleanup_test_db(test_name);

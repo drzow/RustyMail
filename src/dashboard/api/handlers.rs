@@ -21,6 +21,26 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid;
 use serde_json;
 
+/// Appended to every mutating tool's success payload and description.
+/// Warns agents that cache-backed reads lag mutations until a reconcile runs,
+/// and gives the reliable retry-then-poll verification path.
+const MUTATION_CACHE_NOTE: &str = "Change applied on the IMAP server. \
+Cache-backed reads (get_email_by_uid, get_email_by_index, get_folder_stats, \
+count_emails_in_folder, list_cached_emails) will NOT show it until the folder \
+is reconciled. To confirm now: call sync_emails and retry it until it returns \
+status \"started\" — a \"already_running\" reply means your reconcile did NOT \
+run and the cache is still stale (a plain 5-minute incremental sync never \
+clears the dirty flag). Once you get \"started\", poll get_sync_status until \
+the folder's dirty flag is 0. Otherwise it reconciles automatically within the \
+hour. Do not verify by the original UID: a moved message gets a NEW UID at the \
+destination, so the old UID is absent from both source and destination.";
+
+/// Appended to every cache-backed read tool's description.
+const CACHE_READ_NOTE: &str = " Reads the local cache, which can lag the server \
+after a mutation until the folder is reconciled; if you just mutated this \
+folder, confirm via get_sync_status (dirty must be 0) rather than trusting this \
+result.";
+
 // Query parameters for client list endpoint
 #[derive(Debug, Deserialize)]
 pub struct ClientQueryParams {
@@ -211,7 +231,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "atomic_move_message",
-            "description": "Move a single message to another folder",
+            "description": format!("{} {}", "Move a single message to another folder", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -237,7 +257,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "atomic_batch_move",
-            "description": "Move multiple messages to another folder",
+            "description": format!("{} {}", "Move multiple messages to another folder", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -264,7 +284,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "mark_as_deleted",
-            "description": "Mark messages as deleted",
+            "description": format!("{} {}", "Mark messages as deleted", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -287,7 +307,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "delete_messages",
-            "description": "Permanently delete messages",
+            "description": format!("{} {}", "Permanently delete messages", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -310,7 +330,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "undelete_messages",
-            "description": "Unmark messages as deleted",
+            "description": format!("{} {}", "Unmark messages as deleted", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -333,7 +353,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "expunge",
-            "description": "Expunge deleted messages from folder",
+            "description": format!("{} {}", "Expunge deleted messages from folder", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -351,7 +371,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "mark_as_read",
-            "description": "Mark messages as read",
+            "description": format!("{} {}", "Mark messages as read", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -374,7 +394,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "mark_as_unread",
-            "description": "Mark messages as unread",
+            "description": format!("{} {}", "Mark messages as unread", MUTATION_CACHE_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -397,7 +417,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "list_cached_emails",
-            "description": "List cached emails from database",
+            "description": format!("{}{}", "List cached emails from database", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -423,7 +443,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_email_by_uid",
-            "description": "Get full cached email by UID",
+            "description": format!("{}{}", "Get full cached email by UID", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -445,7 +465,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_email_by_index",
-            "description": "Get cached email by position index",
+            "description": format!("{}{}", "Get cached email by position index", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -467,7 +487,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "count_emails_in_folder",
-            "description": "Count total emails in cached folder",
+            "description": format!("{}{}", "Count total emails in cached folder", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -485,7 +505,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_folder_stats",
-            "description": "Get statistics about cached folder",
+            "description": format!("{}{}", "Get statistics about cached folder", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1128,7 +1148,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "atomic_move_message",
-            "description": "Move a single message to another folder",
+            "description": format!("{} {}", "Move a single message to another folder", MUTATION_CACHE_NOTE),
             "parameters": {
                 "from_folder": "Source folder",
                 "to_folder": "Target folder",
@@ -1138,7 +1158,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "atomic_batch_move",
-            "description": "Move multiple messages to another folder",
+            "description": format!("{} {}", "Move multiple messages to another folder", MUTATION_CACHE_NOTE),
             "parameters": {
                 "from_folder": "Source folder",
                 "to_folder": "Target folder",
@@ -1148,7 +1168,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "mark_as_deleted",
-            "description": "Mark messages as deleted",
+            "description": format!("{} {}", "Mark messages as deleted", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "Folder containing messages",
                 "uids": "Array of message UIDs (integers)",
@@ -1157,7 +1177,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "delete_messages",
-            "description": "Permanently delete messages",
+            "description": format!("{} {}", "Permanently delete messages", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "Folder containing messages",
                 "uids": "Array of message UIDs (integers)",
@@ -1166,7 +1186,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "undelete_messages",
-            "description": "Unmark messages as deleted",
+            "description": format!("{} {}", "Unmark messages as deleted", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "Folder containing messages",
                 "uids": "Array of message UIDs (integers)",
@@ -1175,7 +1195,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "expunge",
-            "description": "Expunge deleted messages from folder",
+            "description": format!("{} {}", "Expunge deleted messages from folder", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "Folder to expunge",
                 "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)"
@@ -1184,7 +1204,7 @@ pub async fn list_mcp_tools(
         // Cache-based tools
         serde_json::json!({
             "name": "list_cached_emails",
-            "description": "List cached emails from database",
+            "description": format!("{}{}", "List cached emails from database", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "limit": "Maximum number of emails (default: 20)",
@@ -1194,7 +1214,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_email_by_uid",
-            "description": "Get full cached email by UID",
+            "description": format!("{}{}", "Get full cached email by UID", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "uid": "Email UID",
@@ -1203,7 +1223,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_email_by_index",
-            "description": "Get cached email by position index",
+            "description": format!("{}{}", "Get cached email by position index", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "index": "Zero-based position index",
@@ -1212,7 +1232,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "count_emails_in_folder",
-            "description": "Count total emails in cached folder",
+            "description": format!("{}{}", "Count total emails in cached folder", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)"
@@ -1220,7 +1240,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_folder_stats",
-            "description": "Get statistics about cached folder",
+            "description": format!("{}{}", "Get statistics about cached folder", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)"
@@ -1307,7 +1327,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "mark_as_read",
-            "description": "Mark messages as read (adds \\Seen flag)",
+            "description": format!("{} {}", "Mark messages as read (adds \\Seen flag)", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "REQUIRED. Folder containing messages",
                 "uids": "REQUIRED. Array of message UIDs to mark as read",
@@ -1316,7 +1336,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "mark_as_unread",
-            "description": "Mark messages as unread (removes \\Seen flag)",
+            "description": format!("{} {}", "Mark messages as unread (removes \\Seen flag)", MUTATION_CACHE_NOTE),
             "parameters": {
                 "folder": "REQUIRED. Folder containing messages",
                 "uids": "REQUIRED. Array of message UIDs to mark as unread",
@@ -2134,7 +2154,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uid": uid,
                             "from_folder": from_folder,
-                            "to_folder": to_folder
+                            "to_folder": to_folder,
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2190,7 +2211,8 @@ pub async fn execute_mcp_tool_inner(
                             "uids": uids,
                             "from_folder": from_folder,
                             "to_folder": to_folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2237,7 +2259,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uids": uids,
                             "folder": folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2284,7 +2307,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uids": uids,
                             "folder": folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2331,7 +2355,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uids": uids,
                             "folder": folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2378,7 +2403,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uids": uids,
                             "folder": folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2425,7 +2451,8 @@ pub async fn execute_mcp_tool_inner(
                         "data": {
                             "uids": uids,
                             "folder": folder,
-                            "count": uids.len()
+                            "count": uids.len(),
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -2454,7 +2481,8 @@ pub async fn execute_mcp_tool_inner(
                     serde_json::json!({
                         "success": true,
                         "data": {
-                            "folder": folder
+                            "folder": folder,
+                            "note": MUTATION_CACHE_NOTE
                         },
                         "tool": tool_name
                     })
@@ -3651,7 +3679,14 @@ pub async fn execute_mcp_tool_inner(
             match spawn_sync(&args) {
                 Ok(SpawnOutcome::AlreadyRunning) => serde_json::json!({
                     "success": true,
-                    "data": { "status": "already_running" },
+                    "data": {
+                        "status": "already_running",
+                        "message": "A sync already holds the lock, so your reconcile did NOT \
+start. That running sync may be a plain incremental, which never clears dirty \
+flags. Retry sync_emails until it returns status \"started\", then poll \
+get_sync_status until the target folder's dirty flag is 0. (Any dirty folders \
+are also reconciled automatically each hour.)"
+                    },
                     "tool": tool_name
                 }),
                 Ok(SpawnOutcome::Started { .. }) | Ok(SpawnOutcome::Completed) => serde_json::json!({
