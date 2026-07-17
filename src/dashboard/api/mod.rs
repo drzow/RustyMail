@@ -20,6 +20,7 @@ pub mod config;
 pub mod health;
 pub mod attachments;
 pub mod high_level_tools;
+pub mod sync_status_tool;
 
 // Re-export main types needed elsewhere
 pub use routes::configure as init_routes;

@@ -78,6 +78,7 @@ pub struct SyncState {
     pub error_message: Option<String>,
     pub emails_synced: i32,
     pub emails_total: i32,
+    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -931,15 +932,15 @@ impl CacheService {
 
         let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
 
-        let state = sqlx::query_as::<_, (i64, Option<i64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String, Option<String>, Option<i32>, Option<i32>)>(
-            "SELECT folder_id, last_uid_synced, last_full_sync, last_incremental_sync, sync_status, error_message, emails_synced, emails_total
+        let state = sqlx::query_as::<_, (i64, Option<i64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String, Option<String>, Option<i32>, Option<i32>, i64)>(
+            "SELECT folder_id, last_uid_synced, last_full_sync, last_incremental_sync, sync_status, error_message, emails_synced, emails_total, dirty
              FROM sync_state WHERE folder_id = ?"
         )
         .bind(folder.id)
         .fetch_optional(pool)
         .await?;
 
-        if let Some((folder_id, last_uid, last_full, last_inc, status_str, error_msg, synced, total)) = state {
+        if let Some((folder_id, last_uid, last_full, last_inc, status_str, error_msg, synced, total, dirty)) = state {
             let sync_status = match status_str.as_str() {
                 "syncing" | "Syncing" => SyncStatus::Syncing,
                 "error" => SyncStatus::Error,
@@ -955,10 +956,52 @@ impl CacheService {
                 error_message: error_msg,
                 emails_synced: synced.unwrap_or(0),
                 emails_total: total.unwrap_or(0),
+                dirty: dirty != 0,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    /// All sync_state rows for an account, keyed by folder name, read in one JOIN
+    /// (no dependency on the in-memory folder LRU — correct for a full listing).
+    /// `folders.account_id` IS the account email (schema uses email as the
+    /// accounts PK), so filter on folders directly with no accounts JOIN.
+    pub async fn get_all_sync_states_for_account(&self, account_id: &str)
+        -> Result<Vec<(String, SyncState)>, CacheError> {
+        let pool = self.db_pool.as_ref().ok_or(CacheError::NotInitialized)?;
+
+        let rows = sqlx::query_as::<_, (String, i64, Option<i64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String, Option<String>, Option<i32>, Option<i32>, i64)>(
+            "SELECT f.name, s.folder_id, s.last_uid_synced, s.last_full_sync, s.last_incremental_sync,
+                    s.sync_status, s.error_message, s.emails_synced, s.emails_total, s.dirty
+             FROM sync_state s JOIN folders f ON f.id = s.folder_id
+             WHERE f.account_id = ?
+             ORDER BY f.name"
+        )
+        .bind(account_id)
+        .fetch_all(pool)
+        .await?;
+
+        let states = rows.into_iter().map(|(name, folder_id, last_uid, last_full, last_inc, status_str, error_msg, synced, total, dirty)| {
+            let sync_status = match status_str.as_str() {
+                "syncing" | "Syncing" => SyncStatus::Syncing,
+                "error" => SyncStatus::Error,
+                _ => SyncStatus::Idle,
+            };
+            (name, SyncState {
+                folder_id,
+                last_uid_synced: last_uid.map(|u| u as u32),
+                last_full_sync: last_full,
+                last_incremental_sync: last_inc,
+                sync_status,
+                error_message: error_msg,
+                emails_synced: synced.unwrap_or(0),
+                emails_total: total.unwrap_or(0),
+                dirty: dirty != 0,
+            })
+        }).collect();
+
+        Ok(states)
     }
 
     /// Delete specific emails from cache by UIDs

@@ -724,6 +724,24 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "get_sync_status",
+            "description": "Get sync state for an account's folders (status, progress, and dirty flag). With 'folder', returns that folder's row; without it, returns every folder. Poll after sync_emails until status is 'Idle'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "account_id": {
+                        "type": "string",
+                        "description": "REQUIRED. Email address of the account (e.g., user@example.com)"
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Optional. Specific folder (e.g., 'INBOX'). If omitted, returns all folders for the account."
+                    }
+                },
+                "required": ["account_id"]
+            }
+        }),
+        serde_json::json!({
             "name": "get_email_synopsis",
             "description": "Get a concise synopsis of an email (subject + first sentences)",
             "inputSchema": {
@@ -1311,6 +1329,14 @@ pub async fn list_mcp_tools(
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)",
                 "folder": "Optional. Specific folder to sync (e.g., 'INBOX', 'INBOX/resumes'). If omitted, syncs all folders."
+            }
+        }),
+        serde_json::json!({
+            "name": "get_sync_status",
+            "description": "Get sync state for an account's folders (status, progress, dirty flag). Poll after sync_emails until status is 'Idle'.",
+            "parameters": {
+                "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)",
+                "folder": "Optional. Specific folder (e.g., 'INBOX'). If omitted, returns all folders for the account."
             }
         }),
         serde_json::json!({
@@ -3642,6 +3668,29 @@ pub async fn execute_mcp_tool_inner(
                     "tool": tool_name
                 })
             }
+        }
+        "get_sync_status" => {
+            let account_id = match get_account_id_to_use(&params, &state_data).await {
+                Ok(id) => id,
+                Err(e) => return serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to determine account: {}", e),
+                    "tool": tool_name
+                })
+            };
+
+            let folder = params.get("folder").and_then(|v| v.as_str());
+            let data = crate::dashboard::api::sync_status_tool::get_sync_status_tool(
+                &state.cache_service,
+                &account_id,
+                folder,
+            ).await;
+
+            serde_json::json!({
+                "success": true,
+                "data": data,
+                "tool": tool_name
+            })
         }
         "export_folder_metadata" => {
             let account_id = match get_account_id_to_use(&params, &state_data).await {
