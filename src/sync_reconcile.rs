@@ -158,6 +158,34 @@ pub async fn clear_dirty(pool: &SqlitePool, folder_id: i64) -> Result<(), sqlx::
     Ok(())
 }
 
+/// Record a reconcile failure on the folder's sync_state row (spec §7): sets
+/// sync_status = 'error' (the exact lowercase casing get_sync_state maps to
+/// SyncStatus::Error) and error_message, so get_sync_status can surface it.
+/// Deliberately leaves `dirty` untouched (stays 1 so the next tick retries) and
+/// does not touch last_uid_synced. Upsert mirrors the sync_state ON CONFLICT
+/// pattern; best-effort — callers log if this itself fails.
+pub async fn mark_sync_error(
+    pool: &SqlitePool,
+    folder_name: &str,
+    account_email: &str,
+    message: &str,
+) -> Result<(), sqlx::Error> {
+    let folder_id = get_or_create_folder_id(pool, folder_name, account_email).await?;
+    sqlx::query(
+        "INSERT INTO sync_state (folder_id, sync_status, error_message, updated_at)
+         VALUES (?, 'error', ?, datetime('now'))
+         ON CONFLICT(folder_id) DO UPDATE SET
+             sync_status = 'error',
+             error_message = excluded.error_message,
+             updated_at = datetime('now')"
+    )
+    .bind(folder_id)
+    .bind(message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// PURE DB reconcile (no IMAP) — the unit-testable core:
 /// 1. prune_dead_rows against `live_uids`
 /// 2. update_cached_flags for each (uid, flags) in `flag_updates`

@@ -367,10 +367,15 @@ async fn sync_account(pool: &SqlitePool, account: &AccountRow, folder_filter: Op
             match is_folder_dirty(pool, folder, &account.email_address).await {
                 Ok(true) => {
                     if let Err(e) = rustymail::sync_reconcile::reconcile_folder(pool, &client, &account.email_address, folder).await {
+                        // Record Error status + message (spec §7); dirty stays set for retry.
+                        if let Err(se) = rustymail::sync_reconcile::mark_sync_error(pool, folder, &account.email_address, &e.to_string()).await {
+                            warn!("Failed to record reconcile error state for {}/{}: {}", account.email_address, folder, se);
+                        }
                         warn!("Reconcile failed for {}/{}: {}", account.email_address, folder, e);
                     }
                 }
                 Ok(false) => {}
+                // Dirty-flag read failure changes no folder state; warn only.
                 Err(e) => warn!("Failed to read dirty flag for {}/{}: {}", account.email_address, folder, e),
             }
         }
@@ -431,6 +436,10 @@ async fn reconcile_dirty_folders(pool: &SqlitePool) -> Result<(), Box<dyn std::e
                 warn!("Incremental sync failed for {}/{}: {}", email, folder, e);
             }
             if let Err(e) = rustymail::sync_reconcile::reconcile_folder(pool, &client, &email, folder).await {
+                // Record Error status + message (spec §7); dirty stays set for retry.
+                if let Err(se) = rustymail::sync_reconcile::mark_sync_error(pool, folder, &email, &e.to_string()).await {
+                    warn!("Failed to record reconcile error state for {}/{}: {}", email, folder, se);
+                }
                 warn!("Reconcile failed for {}/{}: {}", email, folder, e);
             }
         }

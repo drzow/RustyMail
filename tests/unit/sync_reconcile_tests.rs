@@ -8,9 +8,9 @@
 //! (IMAP wrapper) exists precisely so this logic can be tested against an
 //! in-memory-style pool. Uses file-based temp DBs (never the live cache DB).
 
-use rustymail::dashboard::services::cache::{CacheService, CacheConfig};
+use rustymail::dashboard::services::cache::{CacheService, CacheConfig, SyncStatus};
 use rustymail::sync_reconcile::{
-    clear_dirty, get_or_create_folder_id, list_dirty_folders, prune_dead_rows,
+    clear_dirty, get_or_create_folder_id, list_dirty_folders, mark_sync_error, prune_dead_rows,
     reconcile_cache, update_cached_flags,
 };
 use sqlx::{Row, SqlitePool};
@@ -372,5 +372,30 @@ async fn list_dirty_folders_spans_multiple_accounts() {
         ],
         "each dirty folder attributed to its own account despite same folder name"
     );
+    cleanup_test_db(test_name);
+}
+
+#[tokio::test]
+#[serial]
+async fn mark_sync_error_sets_error_status_and_keeps_dirty() {
+    let test_name = "mark_sync_error";
+    cleanup_test_db(test_name);
+    let account = "a@test.com";
+    let (svc, pool) = setup_pool(test_name, account).await;
+
+    // Seed a folder + sync_state row that is dirty and currently Idle.
+    let folder_id = get_or_create_folder_id(&pool, "INBOX", account).await.unwrap();
+    set_dirty(&pool, folder_id, 1).await;
+
+    mark_sync_error(&pool, "INBOX", account, "boom: reconcile blew up").await.unwrap();
+
+    // Read back through the service so we exercise the string->SyncStatus mapping.
+    let states = svc.get_all_sync_states_for_account(account).await.unwrap();
+    let (_, state) = states.iter().find(|(name, _)| name == "INBOX").unwrap();
+    assert_eq!(state.sync_status, SyncStatus::Error, "status must map to Error");
+    assert_eq!(state.error_message.as_deref(), Some("boom: reconcile blew up"), "error message stored");
+
+    // dirty must be untouched (still 1) so the next tick retries.
+    assert_eq!(read_dirty(&pool, folder_id).await, 1, "dirty must stay set on error");
     cleanup_test_db(test_name);
 }
