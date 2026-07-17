@@ -258,3 +258,119 @@ async fn prune_dead_rows_removes_absent_uids() {
     assert_eq!(removed_again, 0);
     cleanup_test_db(test_name);
 }
+
+// An empty live-UID set means the server folder is now empty (everything was
+// moved/deleted). reconcile_cache MUST prune every cached row — it must not
+// mistake "SEARCH ALL returned nothing" for "nothing changed, skip pruning".
+#[tokio::test]
+#[serial]
+async fn reconcile_cache_empty_live_uids_prunes_all() {
+    let test_name = "reconcile_empty_live";
+    cleanup_test_db(test_name);
+    let account = "a@test.com";
+    let (_svc, pool) = setup_pool(test_name, account).await;
+
+    let folder_id = get_or_create_folder_id(&pool, "INBOX", account).await.unwrap();
+    for uid in [1u32, 2, 3] {
+        seed_email(&pool, folder_id, uid, "[]").await;
+    }
+    set_dirty(&pool, folder_id, 1).await;
+
+    reconcile_cache(&pool, folder_id, account, "INBOX", &[], &[])
+        .await
+        .unwrap();
+
+    assert!(
+        read_uids(&pool, folder_id).await.is_empty(),
+        "an empty live set must prune every cached row"
+    );
+    assert_eq!(read_dirty(&pool, folder_id).await, 0, "dirty cleared after emptying folder");
+    cleanup_test_db(test_name);
+}
+
+// A UID that was just pruned may still appear in flag_updates (the flags were
+// fetched before the prune decision). prune runs first, so the follow-up
+// UPDATE hits a now-absent row: it must be a silent no-op (0 rows affected,
+// no error) and must NOT resurrect the dead row. The surviving UID's flags
+// still get written.
+#[tokio::test]
+#[serial]
+async fn reconcile_cache_flag_update_for_pruned_uid_is_harmless() {
+    let test_name = "reconcile_flag_pruned";
+    cleanup_test_db(test_name);
+    let account = "a@test.com";
+    let (_svc, pool) = setup_pool(test_name, account).await;
+
+    let folder_id = get_or_create_folder_id(&pool, "INBOX", account).await.unwrap();
+    seed_email(&pool, folder_id, 1, "[]").await; // live
+    seed_email(&pool, folder_id, 2, "[]").await; // dead -> pruned
+    set_dirty(&pool, folder_id, 1).await;
+
+    let live = vec![1u32];
+    let flag_updates = vec![
+        (1u32, vec!["\\Seen".to_string()]),
+        (2u32, vec!["\\Seen".to_string()]), // for the just-pruned uid
+    ];
+    reconcile_cache(&pool, folder_id, account, "INBOX", &live, &flag_updates)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        read_uids(&pool, folder_id).await,
+        vec![1],
+        "flag update for a pruned uid must not resurrect it"
+    );
+    let flags1: String = sqlx::query("SELECT flags FROM emails WHERE folder_id = ? AND uid = 1")
+        .bind(folder_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("flags");
+    assert_eq!(flags1, "[\"\\\\Seen\"]", "surviving uid flags still updated");
+    assert_eq!(read_dirty(&pool, folder_id).await, 0);
+    cleanup_test_db(test_name);
+}
+
+// The hourly reconcile groups dirty folders by account, so list_dirty_folders
+// must attribute each dirty folder to the RIGHT account — even when two
+// accounts have a dirty folder with the identical name (INBOX). A single-account
+// test cannot catch a JOIN that drops or crosses account attribution.
+#[tokio::test]
+#[serial]
+async fn list_dirty_folders_spans_multiple_accounts() {
+    let test_name = "list_dirty_multi_acct";
+    cleanup_test_db(test_name);
+    let account_a = "a@test.com";
+    let (_svc, pool) = setup_pool(test_name, account_a).await;
+
+    let account_b = "b@test.com";
+    sqlx::query(
+        r#"INSERT INTO accounts (email_address, display_name, imap_host, imap_port, imap_user, imap_pass)
+           VALUES (?, ?, 'test.imap.com', 993, ?, 'pw')"#,
+    )
+    .bind(account_b)
+    .bind("Acct B")
+    .bind(account_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let a_inbox = get_or_create_folder_id(&pool, "INBOX", account_a).await.unwrap();
+    let b_inbox = get_or_create_folder_id(&pool, "INBOX", account_b).await.unwrap();
+    let b_sent = get_or_create_folder_id(&pool, "Sent", account_b).await.unwrap();
+    set_dirty(&pool, a_inbox, 1).await;
+    set_dirty(&pool, b_inbox, 1).await;
+    set_dirty(&pool, b_sent, 0).await; // clean -> must be excluded
+
+    let mut dirty = list_dirty_folders(&pool).await.unwrap();
+    dirty.sort();
+    assert_eq!(
+        dirty,
+        vec![
+            (account_a.to_string(), "INBOX".to_string()),
+            (account_b.to_string(), "INBOX".to_string()),
+        ],
+        "each dirty folder attributed to its own account despite same folder name"
+    );
+    cleanup_test_db(test_name);
+}

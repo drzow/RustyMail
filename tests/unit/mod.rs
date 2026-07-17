@@ -23,6 +23,7 @@ pub mod ai_service_tests;
 pub mod cache_service_tests;
 pub mod sync_reconcile_tests;
 pub mod sync_status_tool_tests;
+pub mod dirty_flag_tests;
 pub mod account_service_tests;
 pub mod smtp_service_tests;
 pub mod attachment_tests;
