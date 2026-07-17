@@ -350,9 +350,14 @@ async fn test_mcp_tools_list() {
         "mark_as_read", "mark_as_unread", "mark_as_deleted",
         "delete_messages", "undelete_messages", "expunge",
     ];
+    // All 14 cache-backed read tools (diagnosis 2026-07-17 follow-up): the
+    // original 5 plus the 9 the reviewer verified also read the SQLite cache.
     let cache_read_tools = vec![
         "get_email_by_uid", "get_email_by_index", "get_folder_stats",
         "count_emails_in_folder", "list_cached_emails",
+        "get_email_synopsis", "search_cached_emails", "list_emails_by_flag",
+        "filter_emails_by_subject", "search_by_domain", "get_email_thread",
+        "get_address_report", "search_by_attachment_type", "batch_get_synopsis",
     ];
     let mut seen_mutating = 0;
     let mut seen_read = 0;
@@ -363,6 +368,10 @@ async fn test_mcp_tools_list() {
             seen_mutating += 1;
             assert!(description.contains("Cache-backed reads"),
                     "Mutating tool '{}' description must carry the cache-lag note", name);
+            // The note now names cache-backed reads by category, not a fixed
+            // enumeration, so it stays accurate as tools are added.
+            assert!(description.contains("get_*/list_*/search_*/filter_*/count_*"),
+                    "Mutating tool '{}' description must categorize cache-backed reads", name);
             assert!(description.contains("retry it until it returns status"),
                     "Mutating tool '{}' description must give the retry-then-poll path", name);
             // The note is appended via format!("{} {}", ...) and the const has
@@ -918,7 +927,7 @@ async fn test_mcp_dashboard_tools_carry_cache_notes() {
     let dashboard_body: serde_json::Value = test::read_body_json(dashboard_resp).await;
     let tools = dashboard_body["tools"].as_array().unwrap();
 
-    // Same 8 mutating + 5 cache-backed read tools as test_mcp_tools_list, but
+    // Same 8 mutating + 14 cache-backed read tools as test_mcp_tools_list, but
     // asserted against the list_mcp_tools block.
     let mutating_tools = vec![
         "atomic_move_message", "atomic_batch_move",
@@ -928,6 +937,9 @@ async fn test_mcp_dashboard_tools_carry_cache_notes() {
     let cache_read_tools = vec![
         "get_email_by_uid", "get_email_by_index", "get_folder_stats",
         "count_emails_in_folder", "list_cached_emails",
+        "get_email_synopsis", "search_cached_emails", "list_emails_by_flag",
+        "filter_emails_by_subject", "search_by_domain", "get_email_thread",
+        "get_address_report", "search_by_attachment_type", "batch_get_synopsis",
     ];
 
     // Track that every expected tool was actually present and checked, so a
@@ -941,6 +953,10 @@ async fn test_mcp_dashboard_tools_carry_cache_notes() {
             seen_mutating += 1;
             assert!(description.contains("Cache-backed reads"),
                     "Mutating tool '{}' description must carry the cache-lag note", name);
+            // The note names cache-backed reads by category, not a fixed list,
+            // so it stays accurate as tools are added.
+            assert!(description.contains("get_*/list_*/search_*/filter_*/count_*"),
+                    "Mutating tool '{}' description must categorize cache-backed reads", name);
             assert!(description.contains("retry it until it returns status"),
                     "Mutating tool '{}' description must give the retry-then-poll path", name);
             // Guard against a double-space artifact between the original

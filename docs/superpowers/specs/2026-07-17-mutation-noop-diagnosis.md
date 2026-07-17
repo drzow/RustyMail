@@ -171,9 +171,9 @@ rules 8 "highest abstraction" and no-hardcoding), define two module-level
 ```rust
 /// Appended to every mutating tool's success payload and description.
 const MUTATION_CACHE_NOTE: &str = "Change applied on the IMAP server. \
-Cache-backed reads (get_email_by_uid, get_email_by_index, get_folder_stats, \
-count_emails_in_folder, list_cached_emails) will NOT show it until the folder \
-is reconciled. To confirm now: call sync_emails and retry it until it returns \
+Cache-backed reads — any get_*/list_*/search_*/filter_*/count_* tool that reads \
+the local cache — will NOT show it until the folder is reconciled. To confirm \
+now: call sync_emails and retry it until it returns \
 status \"started\" — a \"already_running\" reply means your reconcile did NOT \
 run and the cache is still stale (a plain 5-minute incremental sync never \
 clears the dirty flag). Once you get \"started\", poll get_sync_status until \
@@ -225,10 +225,20 @@ calling.
 
 ### Fix (c) — flag the read tools as cache-backed  [wording corrected]
 
-Append `CACHE_READ_NOTE` to the descriptions of `get_email_by_uid`,
-`get_email_by_index`, `get_folder_stats`, `count_emails_in_folder`,
-`list_cached_emails` (both blocks; descriptions at ~426, ~448, ~488, ~470, ~400
-and their ~1105-1222 twins). Same `format!` pattern.
+Append `CACHE_READ_NOTE` to the descriptions of **all 14 cache-backed read
+tools** (both blocks; same `format!("{}{}", …)` pattern since the const carries
+its own leading space):
+
+- `get_email_by_uid`, `get_email_by_index`, `get_folder_stats`,
+  `count_emails_in_folder`, `list_cached_emails` (the original five), plus
+- `get_email_synopsis`, `search_cached_emails`, `list_emails_by_flag`,
+  `filter_emails_by_subject`, `search_by_domain`, `get_email_thread`,
+  `get_address_report`, `search_by_attachment_type`, `batch_get_synopsis`
+  (added in the 2026-07-17 follow-up — each verified to read the SQLite cache).
+
+Do **not** annotate `fetch_emails_with_mime`: it is live IMAP
+(`email_service.fetch_emails_for_account`), not a cache read, so it is correctly
+excluded.
 
 ### Fix (d) — make `sync_emails` `already_running` honest  [blocking correction]
 

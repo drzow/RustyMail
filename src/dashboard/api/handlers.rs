@@ -25,9 +25,9 @@ use serde_json;
 /// Warns agents that cache-backed reads lag mutations until a reconcile runs,
 /// and gives the reliable retry-then-poll verification path.
 const MUTATION_CACHE_NOTE: &str = "Change applied on the IMAP server. \
-Cache-backed reads (get_email_by_uid, get_email_by_index, get_folder_stats, \
-count_emails_in_folder, list_cached_emails) will NOT show it until the folder \
-is reconciled. To confirm now: call sync_emails and retry it until it returns \
+Cache-backed reads — any get_*/list_*/search_*/filter_*/count_* tool that reads \
+the local cache — will NOT show it until the folder is reconciled. To confirm \
+now: call sync_emails and retry it until it returns \
 status \"started\" — a \"already_running\" reply means your reconcile did NOT \
 run and the cache is still stale (a plain 5-minute incremental sync never \
 clears the dirty flag). Once you get \"started\", poll get_sync_status until \
@@ -523,7 +523,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "search_cached_emails",
-            "description": "Search within cached emails",
+            "description": format!("{}{}", "Search within cached emails", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -763,7 +763,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_email_synopsis",
-            "description": "Get a concise synopsis of an email (subject + first sentences)",
+            "description": format!("{}{}", "Get a concise synopsis of an email (subject + first sentences)", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -789,7 +789,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_email_thread",
-            "description": "Get all emails in a conversation thread by message_id (uses In-Reply-To and References headers)",
+            "description": format!("{}{}", "Get all emails in a conversation thread by message_id (uses In-Reply-To and References headers)", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -807,7 +807,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "search_by_domain",
-            "description": "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org'). Results are scoped to one folder (default INBOX) so the returned UIDs are directly usable in that folder; each result also includes its 'folder'. IMAP UIDs are per-folder, so always act on a UID within the folder reported.",
+            "description": format!("{}{}", "Search cached emails by sender/recipient domain (e.g., 'gmail.com', 'company.org'). Results are scoped to one folder (default INBOX) so the returned UIDs are directly usable in that folder; each result also includes its 'folder'. IMAP UIDs are per-folder, so always act on a UID within the folder reported.", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -838,7 +838,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_address_report",
-            "description": "Get aggregated report of unique email addresses and domains for an account",
+            "description": format!("{}{}", "Get aggregated report of unique email addresses and domains for an account", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -852,7 +852,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "list_emails_by_flag",
-            "description": "Filter cached emails by IMAP flags (Seen, Flagged, Answered, etc.)",
+            "description": format!("{}{}", "Filter cached emails by IMAP flags (Seen, Flagged, Answered, etc.)", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -892,7 +892,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "search_by_attachment_type",
-            "description": "Search for attachments matching MIME type patterns (e.g., 'image/*', 'application/pdf')",
+            "description": format!("{}{}", "Search for attachments matching MIME type patterns (e.g., 'image/*', 'application/pdf')", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -971,7 +971,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "filter_emails_by_subject",
-            "description": "Filter emails by subject line patterns. Returns metadata only (no body content) — ideal for fast triage of large folders. Matches are case-insensitive substrings. Use match_mode 'any' (default) to match emails containing ANY pattern, or 'all' to require ALL patterns.",
+            "description": format!("{}{}", "Filter emails by subject line patterns. Returns metadata only (no body content) — ideal for fast triage of large folders. Matches are case-insensitive substrings. Use match_mode 'any' (default) to match emails containing ANY pattern, or 'all' to require ALL patterns.", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1019,7 +1019,7 @@ pub fn get_mcp_tools_jsonrpc_format() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "batch_get_synopsis",
-            "description": "Get compact one-paragraph synopses for multiple emails in a single call. Accepts a list of UIDs (max 50) and returns metadata + synopsis for each. Dramatically reduces round-trips compared to calling get_email_synopsis per-UID.",
+            "description": format!("{}{}", "Get compact one-paragraph synopses for multiple emails in a single call. Accepts a list of UIDs (max 50) and returns metadata + synopsis for each. Dramatically reduces round-trips compared to calling get_email_synopsis per-UID.", CACHE_READ_NOTE),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1248,7 +1248,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "search_cached_emails",
-            "description": "Search within cached emails",
+            "description": format!("{}{}", "Search within cached emails", CACHE_READ_NOTE),
             "parameters": {
                 "folder": "Folder name (default: INBOX)",
                 "query": "Search query text",
@@ -1361,7 +1361,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_email_synopsis",
-            "description": "Get a concise synopsis of an email (subject + first sentences)",
+            "description": format!("{}{}", "Get a concise synopsis of an email (subject + first sentences)", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "folder": "Optional. Folder name (default: INBOX)",
@@ -1371,7 +1371,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_email_thread",
-            "description": "Get all emails in a conversation thread by message_id",
+            "description": format!("{}{}", "Get all emails in a conversation thread by message_id", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "message_id": "REQUIRED. Message-ID of any email in the thread"
@@ -1379,7 +1379,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "search_by_domain",
-            "description": "Search cached emails by sender/recipient domain. Scoped to one folder (default INBOX); each result includes its 'folder'. IMAP UIDs are per-folder.",
+            "description": format!("{}{}", "Search cached emails by sender/recipient domain. Scoped to one folder (default INBOX); each result includes its 'folder'. IMAP UIDs are per-folder.", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "domain": "REQUIRED. Domain to search for (e.g., 'gmail.com')",
@@ -1390,14 +1390,14 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "get_address_report",
-            "description": "Get aggregated report of unique email addresses and domains",
+            "description": format!("{}{}", "Get aggregated report of unique email addresses and domains", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account"
             }
         }),
         serde_json::json!({
             "name": "list_emails_by_flag",
-            "description": "Filter cached emails by IMAP flags (Seen, Flagged, Answered, etc.)",
+            "description": format!("{}{}", "Filter cached emails by IMAP flags (Seen, Flagged, Answered, etc.)", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "folder": "Optional. Folder name (default: INBOX)",
@@ -1410,7 +1410,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "search_by_attachment_type",
-            "description": "Search for attachments matching MIME type patterns (e.g., 'image/*', 'application/pdf')",
+            "description": format!("{}{}", "Search for attachments matching MIME type patterns (e.g., 'image/*', 'application/pdf')", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account (e.g., user@example.com)",
                 "mime_types": "REQUIRED. Array of MIME type patterns (e.g., ['image/*', 'application/pdf'])",
@@ -1440,7 +1440,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "filter_emails_by_subject",
-            "description": "Filter emails by subject line patterns. Returns metadata only (no body content).",
+            "description": format!("{}{}", "Filter emails by subject line patterns. Returns metadata only (no body content).", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "folder": "REQUIRED. Folder name (e.g., 'INBOX')",
@@ -1455,7 +1455,7 @@ pub async fn list_mcp_tools(
         }),
         serde_json::json!({
             "name": "batch_get_synopsis",
-            "description": "Get compact synopses for multiple emails in a single call (max 50 UIDs).",
+            "description": format!("{}{}", "Get compact synopses for multiple emails in a single call (max 50 UIDs).", CACHE_READ_NOTE),
             "parameters": {
                 "account_id": "REQUIRED. Email address of the account",
                 "folder": "REQUIRED. Folder name (e.g., 'INBOX')",
