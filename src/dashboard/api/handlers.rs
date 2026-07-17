@@ -4689,89 +4689,37 @@ pub async fn trigger_email_sync(
     };
     info!("Triggering email sync via separate process for {}", mode_desc);
 
-    // Find the sync binary - check multiple locations
-    let sync_binary = if std::path::Path::new("./target/release/rustymail-sync").exists() {
-        "./target/release/rustymail-sync"
-    } else if std::path::Path::new("./target/debug/rustymail-sync").exists() {
-        "./target/debug/rustymail-sync"
-    } else if std::path::Path::new("./rustymail-sync").exists() {
-        "./rustymail-sync"
-    } else {
-        "rustymail-sync"
-    };
-
-    // Build command with optional arguments
-    let mut cmd = std::process::Command::new(sync_binary);
+    // Build args and spawn via the shared helper (locate + spawn + reap).
+    let mut args: Vec<String> = Vec::new();
     if let Some(ref acc) = account_id {
-        cmd.arg("--account").arg(acc);
+        args.push("--account".to_string());
+        args.push(acc.clone());
     }
     if let Some(ref f) = folder {
-        cmd.arg("--folder").arg(f);
+        args.push("--folder".to_string());
+        args.push(f.clone());
     }
     if force {
-        cmd.arg("--force");
+        args.push("--force".to_string());
     }
 
-    // Spawn the sync process and wait for it to complete (or detect already running)
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            info!("Spawned sync process (pid: {})", pid);
-
-            // Wait briefly to see if it exits immediately with "already running" code
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Process exited already
-                    if status.code() == Some(2) {
-                        // Exit code 2 = already running
-                        info!("Sync process reports another sync is already in progress");
-                        Ok(HttpResponse::Ok().json(serde_json::json!({
-                            "message": "Email sync is already in progress",
-                            "status": "in_progress"
-                        })))
-                    } else if status.success() {
-                        // Completed very quickly (unlikely but possible for empty sync)
-                        Ok(HttpResponse::Ok().json(serde_json::json!({
-                            "message": format!("Email sync completed for {}", mode_desc),
-                            "status": "completed"
-                        })))
-                    } else {
-                        // Some other error
-                        error!("Sync process exited with error code: {:?}", status.code());
-                        Err(ApiError::InternalError(format!("Sync process failed with exit code: {:?}", status.code())))
-                    }
-                }
-                Ok(None) => {
-                    // Still running - this is the normal case. Detach a reaper so
-                    // the sync process is waited on when it exits instead of being
-                    // left as a zombie (nothing else waits on this child).
-                    tokio::task::spawn_blocking(move || {
-                        let _ = child.wait();
-                    });
-                    Ok(HttpResponse::Ok().json(serde_json::json!({
-                        "message": format!("Email sync started for {}", mode_desc),
-                        "status": "syncing",
-                        "pid": pid
-                    })))
-                }
-                Err(e) => {
-                    error!("Failed to check sync process status: {}", e);
-                    // Assume it's running; still reap it on exit to avoid a zombie.
-                    tokio::task::spawn_blocking(move || {
-                        let _ = child.wait();
-                    });
-                    Ok(HttpResponse::Ok().json(serde_json::json!({
-                        "message": format!("Email sync started for {}", mode_desc),
-                        "status": "syncing",
-                        "pid": pid
-                    })))
-                }
-            }
-        }
+    use crate::dashboard::services::sync_spawner::{spawn_sync, SpawnOutcome};
+    match spawn_sync(&args) {
+        Ok(SpawnOutcome::AlreadyRunning) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "message": "Email sync is already in progress",
+            "status": "in_progress"
+        }))),
+        Ok(SpawnOutcome::Completed) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Email sync completed for {}", mode_desc),
+            "status": "completed"
+        }))),
+        Ok(SpawnOutcome::Started { pid }) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "message": format!("Email sync started for {}", mode_desc),
+            "status": "syncing",
+            "pid": pid
+        }))),
         Err(e) => {
-            error!("Failed to spawn sync process '{}': {}", sync_binary, e);
+            error!("Failed to start sync process: {}", e);
             Err(ApiError::InternalError(format!("Failed to start sync process: {}", e)))
         }
     }

@@ -45,6 +45,7 @@ pub mod outbox_worker;
 pub mod smtp;
 pub mod smtp_auth;
 pub mod sync;
+pub mod sync_spawner;
 pub mod token_refresh_worker;
 pub mod jobs;
 

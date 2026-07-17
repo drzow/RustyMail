@@ -393,29 +393,9 @@ fn start_sync_process_spawner() {
         loop {
             interval.tick().await;
 
-            // Find the sync binary - check multiple locations
-            let sync_binary = if std::path::Path::new("./target/release/rustymail-sync").exists() {
-                "./target/release/rustymail-sync"
-            } else if std::path::Path::new("./rustymail-sync").exists() {
-                "./rustymail-sync"
-            } else {
-                // Try to find it in PATH
-                "rustymail-sync"
-            };
-
-            match std::process::Command::new(sync_binary).spawn() {
-                Ok(mut child) => {
-                    info!("Spawned sync process (pid: {:?})", child.id());
-                    // Reap the child once it exits. std::process::Child does not
-                    // reap on drop and nothing else waits on it, so without this
-                    // every finished sync process lingers as a zombie.
-                    tokio::task::spawn_blocking(move || {
-                        let _ = child.wait();
-                    });
-                }
-                Err(e) => {
-                    error!("Failed to spawn sync process '{}': {}", sync_binary, e);
-                }
+            // Spawn a pure incremental sync (no flags) via the shared helper.
+            if let Err(e) = rustymail::dashboard::services::sync_spawner::spawn_sync(&[]) {
+                error!("Failed to spawn sync process: {}", e);
             }
         }
     });
