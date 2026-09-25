@@ -47,6 +47,10 @@ pub struct CachedFolder {
 pub struct CachedEmail {
     pub id: i64,
     pub folder_id: i64,
+    /// Display name of the folder this row came from, resolved from the folder record
+    /// (or the joined `folders` row) that produced it. `folder_id` alone cannot attribute
+    /// a list merged across folders, so the name travels with the row.
+    pub folder_name: String,
     pub uid: u32,
     pub message_id: Option<String>,
     pub subject: Option<String>,
@@ -459,6 +463,7 @@ impl CacheService {
         let cached_email = CachedEmail {
             id: email_id,
             folder_id: folder.id,
+            folder_name: folder.name.clone(),
             uid: email.uid,
             message_id: message_id.clone(),
             subject: subject.clone(),
@@ -567,6 +572,7 @@ impl CacheService {
             let cached_email = CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: folder.name.clone(),
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: row.get("message_id"),
                 subject: row.get("subject"),
@@ -669,6 +675,7 @@ impl CacheService {
             cached_emails.push(CachedEmail {
                 id,
                 folder_id,
+                folder_name: folder.name.clone(),
                 uid: uid as u32,
                 message_id,
                 subject,
@@ -749,6 +756,7 @@ impl CacheService {
             cached_emails.push(CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: folder.name.clone(),
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: row.get("message_id"),
                 subject: row.get("subject"),
@@ -1059,6 +1067,7 @@ impl CacheService {
             Ok(Some(CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: folder.name.clone(),
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: row.get("message_id"),
                 subject: row.get("subject"),
@@ -1164,11 +1173,12 @@ impl CacheService {
 
         let mut qb = sqlx::QueryBuilder::new(
             r#"
-            SELECT DISTINCT e.id, e.folder_id, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            SELECT DISTINCT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                    e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                    e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                    e.in_reply_to, e.references_header, e.attachment_parts
             FROM emails e
+            LEFT JOIN folders f ON e.folder_id = f.id
             LEFT JOIN attachment_metadata a ON e.message_id = a.message_id AND a.account_email =
             "#
         );
@@ -1210,6 +1220,7 @@ impl CacheService {
             let cached_email = CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: row.try_get("folder_name")?,
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: row.get("message_id"),
                 subject: row.get("subject"),
@@ -1272,7 +1283,7 @@ impl CacheService {
         let placeholders: Vec<&str> = thread_ids.iter().map(|_| "?").collect();
         let ph_str = placeholders.join(", ");
         let sql = format!(
-            "SELECT e.id, e.folder_id, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            "SELECT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                     e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                     e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                     e.in_reply_to, e.references_header, e.attachment_parts
@@ -1310,6 +1321,7 @@ impl CacheService {
             emails.push(CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: row.get("folder_name"),
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: msg_id,
                 subject: row.get("subject"),
@@ -1353,7 +1365,7 @@ impl CacheService {
 
         let where_clause = conditions.join(" OR ");
         let sql = format!(
-            "SELECT e.id, e.folder_id, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            "SELECT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                     e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                     e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                     e.in_reply_to, e.references_header, e.attachment_parts
@@ -1380,6 +1392,7 @@ impl CacheService {
             emails.push(CachedEmail {
                 id: row.get("id"),
                 folder_id: row.get("folder_id"),
+                folder_name: row.get("folder_name"),
                 uid: row.get::<i64, _>("uid") as u32,
                 message_id: row.get("message_id"),
                 subject: row.get("subject"),
@@ -1454,5 +1467,86 @@ impl CacheService {
             "top_domains": domain_list.iter().take(30).collect::<Vec<_>>(),
         }))
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `CachedEmail` the way the cache layer builds one for a row resolved out of
+    /// `folder_id`/`folder_name`. The remaining fields are inert for serialisation.
+    fn sample_email(id: i64, folder_id: i64, folder_name: &str, uid: u32) -> CachedEmail {
+        CachedEmail {
+            id,
+            folder_id,
+            folder_name: folder_name.to_string(),
+            uid,
+            message_id: Some(format!("<{}@test.local>", id)),
+            subject: Some(format!("subject {}", id)),
+            from_address: Some("sender@example.com".to_string()),
+            from_name: None,
+            to_addresses: vec!["me@example.com".to_string()],
+            cc_addresses: vec![],
+            date: Some(Utc::now()),
+            internal_date: Some(Utc::now()),
+            size: Some(1024),
+            flags: vec!["\\Seen".to_string()],
+            body_text: Some("body".to_string()),
+            body_html: None,
+            cached_at: Utc::now(),
+            has_attachments: false,
+            in_reply_to: None,
+            references_header: None,
+            attachment_parts: None,
+        }
+    }
+
+    /// Row #9: a serialised row must carry the name of the folder it came from, next to the
+    /// id it already carried (`folder_name` is additive — no existing key changes).
+    #[test]
+    fn test_cached_email_serialises_folder_name() {
+        let email = sample_email(1, 5, "Finance", 42);
+
+        let json = serde_json::to_value(&email).expect("CachedEmail serialises");
+        assert_eq!(json["folder_name"], serde_json::json!("Finance"));
+        assert_eq!(json["folder_id"], serde_json::json!(5));
+
+        let round_trip: CachedEmail =
+            serde_json::from_value(json).expect("CachedEmail deserialises back");
+        assert_eq!(round_trip.folder_name, "Finance");
+        assert_eq!(round_trip.folder_id, 5);
+    }
+
+    /// Row #9's actual complaint: rows concatenated out of several folders could not be told
+    /// apart. After serialisation a merged list must be attributable per folder.
+    #[test]
+    fn test_merged_folder_rows_are_distinguishable_by_folder_name() {
+        let finance = vec![
+            sample_email(1, 5, "Finance", 10),
+            sample_email(2, 5, "Finance", 11),
+        ];
+        let unsubscribe = vec![sample_email(3, 77, "Unsubscribe", 20)];
+
+        let mut merged = finance.clone();
+        merged.extend(unsubscribe);
+
+        let json = serde_json::to_value(&merged).expect("merged Vec<CachedEmail> serialises");
+        let rows = json.as_array().expect("merged list serialises as a JSON array");
+        assert_eq!(rows.len(), 3);
+
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|row| row["folder_name"].as_str().expect("folder_name is a JSON string"))
+            .collect();
+        assert_eq!(names, vec!["Finance", "Finance", "Unsubscribe"]);
+
+        // Per-folder counts survive the concatenation, so each row can be attributed.
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for name in &names {
+            *counts.entry(name).or_insert(0) += 1;
+        }
+        assert_eq!(counts.get("Finance"), Some(&2));
+        assert_eq!(counts.get("Unsubscribe"), Some(&1));
+        assert_eq!(counts.len(), 2);
+    }
 }
