@@ -1173,7 +1173,7 @@ impl CacheService {
 
         let mut qb = sqlx::QueryBuilder::new(
             r#"
-            SELECT DISTINCT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            SELECT DISTINCT e.id, e.folder_id, COALESCE(f.name, '') AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                    e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                    e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                    e.in_reply_to, e.references_header, e.attachment_parts
@@ -1283,7 +1283,7 @@ impl CacheService {
         let placeholders: Vec<&str> = thread_ids.iter().map(|_| "?").collect();
         let ph_str = placeholders.join(", ");
         let sql = format!(
-            "SELECT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            "SELECT e.id, e.folder_id, COALESCE(f.name, '') AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                     e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                     e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                     e.in_reply_to, e.references_header, e.attachment_parts
@@ -1365,7 +1365,7 @@ impl CacheService {
 
         let where_clause = conditions.join(" OR ");
         let sql = format!(
-            "SELECT e.id, e.folder_id, f.name AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
+            "SELECT e.id, e.folder_id, COALESCE(f.name, '') AS folder_name, e.uid, e.message_id, e.subject, e.from_address, e.from_name,
                     e.to_addresses, e.cc_addresses, e.date, e.internal_date, e.size,
                     e.flags, e.body_text, e.body_html, e.cached_at, e.has_attachments,
                     e.in_reply_to, e.references_header, e.attachment_parts
